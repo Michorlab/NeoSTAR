@@ -1,7 +1,7 @@
 #!/bin/bash
 # Submit Mutect2 jobs for multiple tumor-normal pairs
 
-# Path to your sbatch script
+# Path to script
 SBATCH_SCRIPT=/michorlab/jacobg/Ellisen/somatic/vcf_to_maf.sh
 
 # Loop through each line

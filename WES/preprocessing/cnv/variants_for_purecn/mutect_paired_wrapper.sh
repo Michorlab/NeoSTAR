@@ -1,8 +1,9 @@
 #!/bin/bash
 
-# Path to script
-SBATCH_SCRIPT=/michorlab/jacobg/Ellisen/somatic/mutect2.sh
-file="sample_pairs.txt"
+# Path to sbatch script
+SBATCH_SCRIPT=/michorlab/jacobg/Ellisen/variant_calling_for_purecn/mutect2_tumors.sh
+file="sample_pairs_new.txt"
+mkdir mutect2_tumor_slurms
 
 # Loop through each line
 while IFS= read -r line; do
@@ -14,7 +15,7 @@ while IFS= read -r line; do
 
     # Generate unique job name based on sample names
     job_name="mutect2_${tumor_name}_${normal_name}"
-    output="mutect2_slurms/${tumor_name}"
+    output="mutect2_tumor_slurms/${tumor_name}"
 
     # Submit the sbatch job with tumor and normal sample names as arguments
     sbatch --job-name="$job_name" --output="$output" "$SBATCH_SCRIPT" "$tumor_name" "$normal_name" "$tumor_bam" "$normal_bam"

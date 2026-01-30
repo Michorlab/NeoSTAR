@@ -1,13 +1,13 @@
 #!/bin/bash
 # Submit Mutect2 jobs for multiple tumor-normal pairs
 
-# Path to your sbatch script
+# Path to sbatch script
 SBATCH_SCRIPT=/michorlab/jacobg/Ellisen/germline/vcf_to_maf.sh
 file="normals.txt"
 
 # Loop through each line in sample_list.txt
 while IFS= read -r line; do
-    # Split the line into tumor and normal sample names
+    # Split the line
     normal_name=$(echo "$line" | awk '{print $1}')
 
     # Generate unique job name based on sample names
