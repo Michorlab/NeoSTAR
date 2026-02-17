@@ -1,0 +1,536 @@
+---
+title: "Variant analysis"
+author: "Jacob Geisberg"
+date: "2024-12-21"
+output: html_document
+---
+
+# LOAD PACKAGES
+```{r}
+# venn package
+library(VennDiagram)
+library(ggplot2)
+library(patchwork)
+library(cowplot)
+library(readxl)
+library(stringr)
+library(tidyverse)
+library(ggrepel)
+library(ggrain)
+library(RColorBrewer)
+library(scales)
+library(clusterProfiler)
+library('org.Hs.eg.db')
+library(createKEGGdb)
+#library(enrichplot)
+library(geomtextpath)
+library(ggrepel)
+library(dplyr)
+library(tidyr)
+library(KEGG.db)
+```
+
+# PREPROCESSING AND ADDING METADATA
+```{r}
+# read data
+variant_path <- '/Users/jacobg/Dropbox/shared_leif/Jacob/WES_2024/somatic/data/mutect2/combined/combined_somatic_mutations_annovar.csv.hg38_multianno.txt'
+df <- read.csv(variant_path,sep="\t")
+#metadata <- read_excel("/Users/jacobg/Dropbox/shared_leif/Jacob/metadata/all_meta_JG202402.xlsx")[1:50,]
+metadata <- read_excel("/Users/jacobg/Dropbox/shared_leif/Jacob/metadata/wes_meta_JG202504.xlsx")[1:50,]
+rownames(metadata) <- metadata$`new name`
+purities <- read.csv('/Users/jacobg/Dropbox/shared_leif/Jacob/WES_2024/copynumber/Data/purecn/purity_ploidy/purities.csv')
+
+
+# add relevant metadata to df
+df$Patient <- sapply(strsplit(df$Tumor_Sample_Barcode, "_"), `[`, 1)
+df$Timing <- sapply(strsplit(df$Tumor_Sample_Barcode, "_"), `[`, 2)
+df$Response <- metadata$`post sg response`[match(df$Patient, rownames(metadata))]
+df$Purity <- purities$Purity[match(df$Tumor_Sample_Barcode, purities$Sampleid)]
+
+#compute vaf and adjusted vaf
+df$Vaf <- df$t_alt_count / df$t_depth
+df$Vaf_adjust <- df$Vaf / df$Purity
+
+# remove redundant fixed samples
+low_purity_samples <-c("BIDMC2_pre", "BIDMC3_post", "BIDMC4_pre", "BIDMC4_post", "BIDMC5_post", "BIDMC6_pre",
+                       "BIDMC6_post", "BIDMC7_post", "DFC7_pre_FFT", "DFC9_pre", "DFC19_pre", "DFC12_post",
+                       "DFC19_pre", "DFC20_post", "DFC23_post", "MGH3_post", "MGH5_post", "MGNS4_pre", 
+                       "NWH2_pre_FFT", "MGNS5_post")
+redundant_fixed_samples <- c("DFC1_pre")
+low_coverage <- c('DFC19_post', "MGNS4_post", "BIDMC3_post", "DFC1_post")
+excluded_samples <- c(low_purity_samples, redundant_fixed_samples, low_coverage)
+df_analysis_set <- df %>% filter(!(Tumor_Sample_Barcode %in% excluded_samples))
+
+#remove germline, silent and intergenic variants
+impact_variant_functions <- c("nonsynonymous SNV", "stopgain", "frameshift deletion", "nonframeshift deletion","stoploss",
+                              "nonframeshift substitution", "frameshift substitution", "startloss")
+df_analysis_set <- df_analysis_set %>% filter(FILTER == 'PASS', ExonicFunc.refGene %in% impact_variant_functions)
+```
+
+# COMPUTE CANCER CELL FRACTION
+```{r}
+# taken from PureCN code https://github.com/lima1/PureCN/blob/devel/R/PureCN-internal.R#L1068-L1091 and https://github.com/lima1/PureCN/issues/267
+calculate_ccf <- function(vaf, depth, purity, C){
+  # see DOI: 10.1126/scitranslmed.aaa1408
+  if (is.na(vaf)) return(c(NA, NA, NA))
+  possible_ccfs <- seq(0.01, 1, 0.01)
+  vaf <- as.numeric(vaf) # added by me since it is somehow a character type
+  depth <- as.numeric(depth) 
+  purity <- as.numeric(purity)
+  C <- as.numeric(C) 
+  possible_vafs <- (purity * possible_ccfs)/
+    ((2 * (1 - purity)) + (purity * C)) #Expected VAF for each CCF
+  possible_vafs <- pmax(pmin(possible_vafs, 1), 0)  
+  probs <- dbinom(x=round(vaf*depth), size = depth, prob = possible_vafs) #Prob of observed VAF
+  names(probs) <- possible_ccfs
+  if (!sum(probs)) {
+    if (vaf > max(possible_vafs)) return(c(1, 1, 1))
+    return(c(NA, NA, NA))
+  }
+  probs_norm <- probs / sum(probs) #Normalise to get posterior distribution
+  probs_sort <- sort(probs_norm, decreasing = TRUE)
+  probs_cum <- cumsum(probs_sort)
+  n <- sum(probs_cum < 0.95) + 1 #Get 95% confidence interval (95% of probability)
+  threshold <- probs_sort[n]
+  cint  <- probs[probs_norm >= threshold]
+  ccf_point <- as.numeric(names(which.max(probs_norm)))
+  ccf_lower <- as.numeric(names(cint)[1])
+  ccf_upper <- as.numeric(names(cint)[length(cint)])
+  return(c(ccf_point, ccf_lower, ccf_upper))
+}
+
+```
+
+```{r}
+cnv_path <- "/Users/jacobg/Dropbox/shared_leif/Jacob/WES_2024/copynumber/Data/purecn/segments/"
+file_list <- list.files(path = cnv_path, pattern = "*.seg", full.names = TRUE)
+df_list <- lapply(file_list, function(file) {read_delim(file, delim = "\t", show_col_types = FALSE)})
+cnv_df <- do.call(rbind, df_list)
+#cnv_df$C <- lapply(cnv_df$C, function(x) {min(x,6)}) # maybe we should not do this here
+cnv_df$chrom[cnv_df$chrom == 23] <- "X"
+
+df_analysis_set$copynumber <- NA
+prev_segment <- NULL
+prev_id <- NULL
+prev_chrom <- NULL
+
+# Iterate over each row in df_analysis_set
+for (i in 1:nrow(df_analysis_set)) {
+  variant <- df_analysis_set[i, ]
+  
+  # Check if the current variant belongs to the same segment as the previous variant
+  if (!is.null(prev_segment) &&
+      variant$Tumor_Sample_Barcode == prev_id &&
+      variant$Chr == prev_chrom &&
+      variant$Start >= prev_segment$loc.start &&
+      variant$Start <= prev_segment$loc.end) {
+    
+    # Assign the C value of the previous segment to the current variant
+    df_analysis_set$copynumber[i] <- prev_segment$C[[1]]
+    
+  } else {
+    # Find the matching segment for the current variant
+    segment <- cnv_df[cnv_df$ID == variant$Tumor_Sample_Barcode &
+                        cnv_df$chrom == variant$Chr &
+                        cnv_df$loc.start <= variant$Start &
+                        cnv_df$loc.end >= variant$Start, ]
+    
+    # Check if a matching segment is found
+    if (nrow(segment) > 0) {
+      df_analysis_set$copynumber[i] <- segment$C[[1]]
+      prev_segment <- segment
+      prev_id <- variant$Tumor_Sample_Barcode
+      prev_chrom <- variant$Chr
+    }
+    else{
+      print(prev_segment)
+      print(paste(c(variant$Tumor_Sample_Barcode,variant$Chr, variant$Start, variant$t_depth)))
+    }
+  }
+}
+df_analysis_set <- df_analysis_set %>% dplyr::filter(copynumber >=0) # get rid of copynumber na
+
+
+ccf_cols <- t(apply(df_analysis_set, 1, function(row) {
+  calculate_ccf(vaf = row["Vaf"], depth = row["t_depth"], purity = row["Purity"], C = row["copynumber"])
+}))
+
+colnames(ccf_cols) <- c("ccf", "ccf_lower", "ccf_upper")
+df_analysis_set <- cbind(df_analysis_set, as.data.frame(ccf_cols))
+```
+
+# GET PAIRED SAMPLES AND FILTER VARIANTS USING CANCER CELL FRACTION
+```{r}
+# get paired samples
+pairs_df <- df_analysis_set %>%
+  group_by(Patient) %>%
+  filter(n_distinct(Tumor_Sample_Barcode) >= 2)
+
+
+# VAF HIGHEST VAF FILTER 
+patient_var_max_vaf <- aggregate(pairs_df$Vaf, list(pairs_df$AAChange.refGene, pairs_df$Tumor_Sample_Barcode), max)
+passing_variants <-patient_var_max_vaf[patient_var_max_vaf$x > 0.05,]$Group.1 
+pair_pass_df <-subset(pairs_df, AAChange.refGene %in% passing_variants)
+df_pass <- df_analysis_set %>% filter(Vaf >= 0.05) 
+
+
+```
+
+# TMB
+```{r}
+target_bed_file <- read.delim("/Users/jacobg/Dropbox/shared_leif/Jacob/WES_2024/somatic/data/Twist_Exome_Targets_hg38_modified_no_chr.bed", col.names = c('chr','start', 'end'))
+target_bed_file$length <- (target_bed_file$end - target_bed_file$start) + 1 
+mb <- sum(target_bed_file$length) / (10**6)
+print(mb)
+
+tmb_df <- df_pass %>% 
+  group_by(Tumor_Sample_Barcode) %>% 
+  summarise(Count = n()) %>%
+  mutate(TMB = Count / mb) %>%
+  ungroup()
+
+write.csv(tmb_df, '/Users/jacobg/Dropbox/shared_leif/Jacob/WES_2024/somatic/data/TMB.csv')
+```
+
+
+
+# KEGG ANALYSIS
+```{r}
+# all samples
+all_sample_mut_genes <- unique(df_pass$Gene.refGene)
+entrez <-  bitr(all_sample_mut_genes, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")$ENTREZID
+
+# get mutation ccf deltas from pre to post
+paired_counts_in_both <- pair_pass_df %>%
+  ungroup() %>%
+  dplyr::select(Gene.refGene, AAChange.refGene, ExonicFunc.refGene, Patient, Timing, ccf, copynumber) %>%
+  pivot_wider(names_from = Timing, values_from = c(ccf, copynumber)) %>%
+  drop_na()
+paired_counts_in_both$ccf_delta <- paired_counts_in_both$ccf_post - paired_counts_in_both$ccf_pre
+paired_counts_in_both$cn_delta <- paired_counts_in_both$copynumber_post - paired_counts_in_both$copynumber_pre
+
+increased_post_vars <- paired_counts_in_both %>% filter(ccf_delta > 0.1) #0.1
+increased_pre_vars <- paired_counts_in_both %>% filter(ccf_delta < -0.1) #-0.1
+increased_post_genes <- unique(increased_post_vars$Gene.refGene)
+increased_pre_genes <- unique(increased_pre_vars$Gene.refGene)
+gene_deltas <- gene_deltas <- as.vector(sort(tapply(paired_counts_in_both$ccf_delta, paired_counts_in_both$Gene.refGene, sum), decreasing = TRUE))
+gene_deltas <- paired_counts_in_both %>%
+  group_by(Gene.refGene) %>%
+  summarise(ccf_delta_sum = sum(ccf_delta)) %>%
+  arrange(desc(ccf_delta_sum)) %>%
+  pull(ccf_delta_sum, name = Gene.refGene)
+
+increased_post_genes_kegg <- bitr(increased_post_genes, fromType="SYMBOL", toType="ENTREZID",  OrgDb="org.Hs.eg.db")$ENTREZID
+increased_pre_genes_kegg <- bitr(increased_pre_genes, fromType="SYMBOL", toType="ENTREZID",  OrgDb="org.Hs.eg.db")$ENTREZID
+delta_KEGG_names <- bitr(names(gene_deltas), fromType = "SYMBOL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db", drop = FALSE)
+gene_deltas_KEGG <- gene_deltas %>% 
+  setNames(delta_KEGG_names$ENTREZID[match(names(.), delta_KEGG_names$SYMBOL)]) %>% 
+  .[!is.na(names(.))]
+
+# all variants
+all_kegg <- enrichKEGG(
+  organism = "hsa",
+  gene = entrez,
+  keyType = 'kegg',
+  pvalueCutoff  = 0.5, #0.01
+  qvalueCutoff  = 0.5, #0.05
+  maxGSSize    = 500,
+  pAdjustMethod = "BH",
+  use_internal_data = TRUE
+)
+
+head(all_kegg)
+barplot(all_kegg, showCategory=10) +
+  ggtitle("enrichment all kegg") 
+dotplot(all_kegg, size='pvalue', showCategory=10) +
+  ggtitle("enrichment all kegg")
+
+increased_post_genes_kegg <- bitr(increased_post_genes, fromType="SYMBOL", toType="ENTREZID",  OrgDb="org.Hs.eg.db")$ENTREZID
+increased_pre_genes_kegg <- bitr(increased_pre_genes, fromType="SYMBOL", toType="ENTREZID",  OrgDb="org.Hs.eg.db")$ENTREZID
+delta_KEGG_names <- bitr(names(gene_deltas), fromType = "SYMBOL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db", drop = FALSE)
+gene_deltas_KEGG <- gene_deltas %>% 
+  setNames(delta_KEGG_names$ENTREZID[match(names(.), delta_KEGG_names$SYMBOL)]) %>% 
+  .[!is.na(names(.))]
+
+post_paired_kegg <- enrichKEGG(
+  organism = "hsa",
+  gene = increased_post_genes_kegg,
+  keyType = 'kegg',
+  pvalueCutoff  = 0.9, #0.01
+  qvalueCutoff  = 0.9, #0.05
+  maxGSSize    = 500,
+  pAdjustMethod = "BH",
+  use_internal_data = TRUE
+)
+
+head(post_paired_kegg)
+barplot(post_paired_kegg, showCategory=10) +
+  ggtitle("enrichment post_paired kegg")
+dotplot(post_paired_kegg, size='pvalue', showCategory=10) +
+  ggtitle("enrichment post_paired kegg")
+dotplot(post_paired_kegg, color='pvalue', showCategory=10) +
+  ggtitle("enrichment post_paired kegg")
+
+post_paired_kegg_sym <- setReadable(
+  post_paired_kegg,
+  OrgDb   = org.Hs.eg.db,
+  keyType = "ENTREZID"
+)
+head(as.data.frame(post_paired_kegg_sym)[, c("ID","Description","geneID")])
+write_csv(head(as.data.frame(post_paired_kegg_sym)), "/Users/jacobg/Dropbox/shared_leif/neoSTAR A1 manuscript prep/exome_Jacob/tables/enhanced_post_kegg_pathways.csv")
+
+pre_paired_kegg <- enrichKEGG(
+  organism = "hsa",
+  gene = increased_pre_genes_kegg,
+  keyType = 'kegg',
+  pvalueCutoff  = 0.5, #0.01
+  qvalueCutoff  = 0.5, #0.05
+  maxGSSize    = 500,
+  pAdjustMethod = "BH",
+  use_internal_data = TRUE
+)
+
+head(pre_paired_kegg)
+barplot(pre_paired_kegg, showCategory=10) +
+  ggtitle("enrichment pre_paired kegg")
+dotplot(pre_paired_kegg, size='pvalue', showCategory=10) +
+  ggtitle("enrichment pre_paired kegg")
+
+
+# KEGG GSEA
+paired_KEGG_GSEA <- gseKEGG(
+  geneList     = gene_deltas_KEGG,
+  keyType       = 'kegg',
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.5, #0.01
+  maxGSSize    = 500, # 500 default, maybe this is not reasonable
+  use_internal_data = TRUE,
+)
+head(paired_KEGG_GSEA)
+ridgeplot(paired_KEGG_GSEA, showCategory = 10) +
+  ggtitle("GSEA pre_vs_post kegg")
+```
+
+
+# PAIRED PLOTS
+```{r}
+paired_counts_in_both2 <- df %>%
+  # Apply remove bad samples and non impact variants
+  dplyr::filter(
+    !(Tumor_Sample_Barcode %in% excluded_samples),
+    #FILTER == 'PASS',
+    ExonicFunc.refGene %in% impact_variant_functions
+  ) %>%
+  
+  # Map copy numbers
+  dplyr::left_join(
+    cnv_df %>% 
+      dplyr::select(ID, chrom, loc.start, loc.end, C),
+    by = c("Tumor_Sample_Barcode" = "ID", "Chr" = "chrom"),
+    relationship = "many-to-many"
+  ) %>%
+  dplyr::filter(Start >= loc.start & Start <= loc.end) %>%
+  dplyr::group_by(Tumor_Sample_Barcode, Chr, Start, End, AAChange.refGene) %>%
+  dplyr::slice(1) %>%  # Keep first matching segment
+  dplyr::ungroup() %>%
+  dplyr::rename(copynumber = C) %>%
+  dplyr::filter(copynumber >= 0) %>%
+  
+  # Calculate CCF
+  dplyr::rowwise() %>%
+  dplyr::mutate(
+    ccf_results = list(calculate_ccf(Vaf, t_depth, Purity, copynumber)),
+    ccf = ccf_results[[1]],
+    ccf_lower = ccf_results[[2]],
+    ccf_upper = ccf_results[[3]]
+  ) %>%
+  dplyr::select(-ccf_results) %>%
+  dplyr::ungroup() %>%
+  
+  # Get paired samples and apply VAF filter
+  dplyr::group_by(Patient) %>%
+  dplyr::filter(n_distinct(Tumor_Sample_Barcode) >= 2) %>%
+  dplyr::ungroup() %>%
+
+  
+  # Pivot to wide format
+  dplyr::select(Gene.refGene, AAChange.refGene, ExonicFunc.refGene, 
+                Patient, Timing, Vaf,FILTER, ccf, copynumber) %>%
+  tidyr::pivot_wider(
+    names_from = Timing, 
+    values_from = c(ccf, copynumber, Vaf, FILTER),
+    values_fn = dplyr::first
+  ) %>%
+  tidyr::replace_na(list(
+  ccf_pre = 0,
+  ccf_post = 0,
+  Vaf_pre = 0,
+  Vaf_post = 0,
+  FILTER_pre = "MISSING",
+  FILTER_post = "MISSING"
+)) %>%
+  # mark missing variants
+  dplyr::mutate(
+  variant_presence = case_when(
+    ccf_pre > 0 & ccf_post > 0 ~ "Both",
+    ccf_pre > 0 & ccf_post == 0 ~ "Pre_only", 
+    ccf_pre == 0 & ccf_post > 0 ~ "Post_only",
+    TRUE ~ "Neither" 
+  )
+) %>%
+  # Add delta columns
+  dplyr::mutate(
+    ccf_delta = ccf_post - ccf_pre,
+    cn_delta = copynumber_post - copynumber_pre
+  )
+
+
+
+# Create unique identifiers
+paired_counts_in_both2_with_id <- paired_counts_in_both2 %>%
+  dplyr::mutate(row_id = paste(Patient, AAChange.refGene, sep = "___"))
+
+
+
+
+```
+
+
+# CONVERT TO CORRECT NAMES
+```{r}
+metadata$patient <- paste0("P", sprintf("%02d", as.numeric(metadata$`original index`)))
+paired_counts_in_both2_with_id$Patient <- metadata$patient[match(paired_counts_in_both2_with_id$Patient, metadata$`new name`)]
+```
+
+
+# NEW PRE-POST PLOT
+```{r}
+# Filter to only keep variants where at least one timepoint passes both filters
+paired_counts_filtered <- paired_counts_in_both2_with_id %>%
+  mutate(
+    passes_filters_pre = (Vaf_pre >= 0.05) & (FILTER_pre == "PASS"),
+    passes_filters_post = (Vaf_post >= 0.05) & (FILTER_post == "PASS")
+  ) %>%
+  filter(passes_filters_pre | passes_filters_post)
+
+
+# Create long format data for plotting
+paired_long <- paired_counts_filtered %>%
+  dplyr::select(Gene.refGene, Patient, ccf_pre, ccf_post, ccf_delta) %>%
+  tidyr::pivot_longer(
+    cols = c(ccf_pre, ccf_post),
+    names_to = "timepoint",
+    values_to = "ccf_value"
+  ) %>%
+  dplyr::mutate(timepoint = factor(timepoint, 
+                           levels = c("ccf_pre", "ccf_post"),
+                           labels = c("Pre", "Post")))
+
+# Define genes to highlight
+highlight_genes <- c("TNC", "ITGA6", "PIP5K1B", "ACTN4", "ABCA8", "ABCA13", "NSD1")
+
+# Add highlighting columns to your data
+paired_long <- paired_long %>%
+  mutate(
+    gene_highlight = ifelse(Gene.refGene %in% highlight_genes, "highlighted", "normal"),
+    line_highlight = ifelse(ccf_delta > 0.1, "highlighted", "normal")
+  )
+
+# Split data for layering
+normal_genes_normal_delta <- paired_long %>% filter(gene_highlight == "normal" & line_highlight == "normal")
+normal_genes_high_delta <- paired_long %>% filter(gene_highlight == "normal" & line_highlight == "highlighted")
+highlighted_genes_normal_delta <- paired_long %>% filter(gene_highlight == "highlighted" & line_highlight == "normal")
+highlighted_genes_high_delta <- paired_long %>% filter(gene_highlight == "highlighted" & line_highlight == "highlighted")
+
+# Create annotation data for highlighted genes
+annotation_data <- paired_long %>%
+  filter(gene_highlight == "highlighted") %>%
+  arrange(Patient, Gene.refGene, timepoint) %>%
+  group_by(Patient, Gene.refGene) %>%
+  summarise(
+    ccf_first = ccf_value[1],
+    ccf_last = ccf_value[n()],
+    .groups = "drop"
+  ) %>%
+  arrange(Patient, Gene.refGene) %>%
+  group_by(Patient) %>%
+  mutate(
+    side = rep(c("left", "right"), length.out = n()),
+    x_pos = ifelse(side == "left", 1, 2),
+    y_pos = ifelse(side == "left", ccf_first, ccf_last),
+    nudge_x_val = ifelse(side == "left", -0.8, 0.8),
+    hjust_val = ifelse(side == "left", "right", "left")
+  ) %>%
+  ungroup()
+
+# Create the plot
+p <- ggplot(paired_long, aes(x = timepoint, y = ccf_value)) +
+  # Layer 1: Normal genes, normal delta
+  geom_line(data = normal_genes_normal_delta, 
+            aes(group = Gene.refGene), 
+            color = "black", alpha = 0.1, linewidth = 0.7) +
+  geom_point(data = normal_genes_normal_delta, 
+             color = "black", alpha = 0.1, size = 1.5) +
+  
+  # Layer 2: Normal genes, high delta
+  geom_line(data = normal_genes_high_delta, 
+            aes(group = Gene.refGene), 
+            color = "red", alpha = 0.7, linewidth = 0.7) +
+  geom_point(data = normal_genes_high_delta, 
+             color = "black", alpha = 0.1, size = 1.5) +
+  
+  # Layer 3: Highlighted genes, normal delta
+  geom_line(data = highlighted_genes_normal_delta, 
+            aes(group = Gene.refGene), 
+            color = "black", alpha = 1.0, linewidth = 0.7) +
+  geom_point(data = highlighted_genes_normal_delta, 
+             color = "red", alpha = 1.0, size = 1.5) +
+  
+  # Layer 4: Highlighted genes, high delta
+  geom_line(data = highlighted_genes_high_delta, 
+            aes(group = Gene.refGene), 
+            color = "red", alpha = 1.0, linewidth = 0.7) +
+  geom_point(data = highlighted_genes_high_delta, 
+             color = "red", alpha = 1.0, size = 1.5) +
+  
+  # Gene name annotations
+  geom_text_repel(data = annotation_data, 
+                  aes(x = x_pos, y = y_pos, label = Gene.refGene),
+                  color = "red", 
+                  size = 2.5,
+                  fontface = "bold",
+                  max.overlaps = Inf,
+                  direction = "y",
+                  nudge_x = annotation_data$nudge_x_val,
+                  hjust = annotation_data$hjust_val,
+                  segment.color = "red",
+                  segment.alpha = 0.6,
+                  segment.linetype = 2,
+                  min.segment.length = 0,
+                  inherit.aes = FALSE) +
+  facet_wrap(~ Patient, nrow=2) +
+  scale_x_discrete(expand = expansion(mult = 0.5)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  labs(title = "Changes in CCF Values Pre vs Post",
+       x = "Timepoint",
+       y = "CCF Value") +
+  theme_bw() +
+  theme(
+    strip.background = element_rect(fill = "lightblue"),
+    strip.text = element_text(face = "bold"),
+    legend.position = "none"
+  )
+
+print(p)
+
+ggsave('/Users/jacobg/Dropbox/shared_leif/neoSTAR A1 manuscript prep/exome_Jacob/plots/paired_mutation_lineplot.pdf', plot=p, width = 12, height = 8, units = "in")
+
+# save mutation table
+paired_counts_filtered <- paired_counts_filtered %>% 
+  dplyr::select(Patient, Gene.refGene, AAChange.refGene, ExonicFunc.refGene, ccf_pre, ccf_post, FILTER_pre, FILTER_post, copynumber_pre, copynumber_post, Vaf_pre, Vaf_post) %>%
+  dplyr::arrange(as.numeric(gsub("P", "", Patient)), Gene.refGene)
+
+write_csv(paired_counts_filtered, "/Users/jacobg/Dropbox/shared_leif/neoSTAR A1 manuscript prep/exome_Jacob/tables/pre_post_mutation_table.csv")
+```
+
+

@@ -1,0 +1,744 @@
+---
+title: "Heatmap"
+author: "Jacob Geisberg"
+date: "2025-04-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Imports
+
+```{r}
+library(devtools)
+library(ComplexHeatmap)
+library(dplyr)
+library(tidyverse)
+library(circlize)
+library(tidyr)
+library(tibble)
+library(readxl)
+library(RColorBrewer)
+
+```
+
+## Gene list
+```{r}
+cancer_gene_list <- c("ABL1", "CD79B", "ERCC2", "IRS2", "MYCN", "RPTOR", 
+                "ABL2", "CDH1", "ERG", "JAK1", "NF1", "RUNX1", 
+                "AKT1", "CDH2", "ESR1", "JAK2", "NF2", "SMAD2", 
+                "AKT2", "CDH20", "EZH2", "JAK3", "NKX2-1", "SMAD3", 
+                "AKT3", "CDH5", "FANCA", "JUN", "NOTCH1", "SMAD4", 
+                "ALK", "CDK4", "FBXW7", "KDM6A", "NPM1", "SMARCA4", 
+                "APC", "CDK6", "FGFR1", "KDR", "NRAS", "SMARCB1", 
+                "AR", "CDK8", "FGFR2", "KIT", "NTRK1", "SMO", 
+                "ARAF", "CDKN2A", "FGFR3", "KRAS", "NTRK2", "SOX10", 
+                "ARFRP1", "CDKN2B", "FGFR4", "LRP1B", "NTRK3", "SOX2", 
+                "ARID1A", "CDKN2C", "FLT1", "LRP6", "PAK3", "SRC", 
+                "ATM", "CEBPA", "FLT3", "LTK", "PAX5", "STAT3", 
+                "ATR", "CHEK1", "FLT4", "MAP2K1", "PDGFRA", "STK11", 
+                "AURKA", "CHEK2", "FOXP4", "MAP2K2", "PDGFRB", "SUFU", 
+                "AURKB", "CRKL", "GATA1", "MAP2K4", "PHLPP2", "TBX22", 
+                "BAP1", "CRLF2", "GNA11", "MCL1", "PIK3CA", "TET2", 
+                "BCL2", "CTNNB1", "GNAQ", "MDM2", "PIK3CG", "TGFBR2", 
+                "BCL2A1", "DDR2", "GNAS", "MDM4", "PIK3R1", "TNFAIP3", 
+                "BCL2L1", "DNMT3A", "GPR124", "MEN1", "PKHD1", "TNKS", 
+                "BCL2L2", "DOT1L", "GUCY1A2", "MET", "PLCG1", "TNKS2", 
+                "BCL6", "EGFR", "HOXA3", "MITF", "PRKDC", "TOP1", 
+                "BRAF", "EPHA3", "HRAS", "MLH1", "PTCH1", "TP53", 
+                "BRCA1", "EPHA5", "HSP90AA1", "MLL", "PTCH2", "TSC1", 
+                "BRCA2", "EPHA6", "IDH1", "MPL", "PTEN", "TSC2", 
+                "CARD11", "EPHA7", "IDH2", "MRE11A", "PTPN11", "USP9X", 
+                "CBL", "EPHB1", "IGF1R", "MSH2", "PTPRD", "VHL", 
+                "CCND1", "EPHB4", "IGF2R", "MSH6", "RAF1", "WT1", 
+                "CCND2", "EPHB6", "IKBKE", "MTOR", "RARA", 
+                "CCND3", "ERBB2", "IKZF1", "MUTYH", "RB1", 
+                "CCNE1", "ERBB3", "INHBA", "MYC", "RET", 
+                "CD79A", "ERBB4", "INSR", "MYCL1", "RICTOR")
+
+phylogic_list <- c("ABL1", "AKT1", "ALK", "APC", "ARID1A", "ARID2", "ASXL1", "ATM", "ATRX", 
+                   "BAP1", "BCL6", "BCOR", "BRAF", "BRCA1", "BRCA2", "CARD11", "CBL", 
+                   "CBLB", "CBLC", "CD79A", "CD79B", "CDH1", "CDK12", "CDKN2A", "CEBPA", 
+                   "CIC", "COPEB", "CREBBP", "CRLF2", "CTNNB1", "CYLD", "DAXX", "DICER1", 
+                   "DNM2", "DNMT3A", "ECT2L", "EGFR", "EP300", "ERBB2", "ESR1", "EZH2", 
+                   "FAM46C", "FBXO11", "FBXW7", "FGFR2", "FGFR3", "FLT3", "FOXL2", "FUBP1", 
+                   "GATA1", "GATA2", "GATA3", "GNA11", "GNAQ", "GNAS", "GRAF", "H3F3A", 
+                   "HRAS", "HRPT2", "IDH1", "IDH2", "IL7R", "JAK1", "JAK2", "JAK3", "KDM5C", 
+                   "KDM6A", "KDR", "KIT", "KRAS", "MADH4", "MAP2K1", "MAP2K2", "MAP2K4", 
+                   "MED12", "MEN1", "MET", "MLH1", "MLL2", "MLL3", "MPL", "MSH2", "MSH6", 
+                   "MYD88", "NF1", "NF2", "NFE2L2", "NOTCH1", "NOTCH2", "NPM1", "NRAS", 
+                   "PAX5", "PBRM1", "PDGFRA", "PHF6", "PHOX2B", "PIK3CA", "PIK3R1", 
+                   "PPP2R1A", "PRDM1", "PRKAR1A", "PTCH", "PTEN", "PTPN11", "RB1", "RET", 
+                   "SETD2", "SF3B1", "SH2B3", "SMARCA4", "SMARCB1", "SMO", "SOCS1", "SRSF2", 
+                   "STK11", "SUFU", "TCF1", "TET2", "TNFAIP3", "TNFRSF14", "TNFRSF6", "TP53", 
+                   "TSC1", "TSC2", "TSHR", "U2AF1", "VHL", "WT1", "WTX", "XPO1", "ZRSR2", 
+                   "ACO1", "ACVR1B", "ACVR2B", "ADNP", "ALKBH6", "ALPK2", "ANK3", "APOL2", 
+                   "ARID5B", "ASXL2", "ATP5B", "AXIN2", "AZGP1", "B2M", "BCAS3", "BCLAF1", 
+                   "BHMT2", "BRE", "C3orf70", "CAP2", "CASP8", "CBFB", "CCDC120", "CCDC6", 
+                   "CCND1", "CD1D", "CD70", "CDC27", "CDK4", "CDKN1A", "CDKN1B", "CEP76", 
+                   "CHD4", "CHD8", "CNBD1", "CNKSR1", "COL5A1", "COL5A3", "CTCF", "CUL4B", 
+                   "CUX1", "DDX3X", "DDX5", "DIAPH1", "DIS3", "DNAH12", "DNER", "EIF2S2", 
+                   "ELF3", "EPHA2", "ERBB3", "ERCC2", "EZH1", "EZR", "FAM166A", "FAT1", 
+                   "FGFBP1", "FOXA1", "FOXQ1", "FRMD7", "GNA13", "GNB1", "GNPTAB", "GOT1", 
+                   "GPS2", "GRLF1", "GUSB", "HIST1H1E", "HIST1H3B", "HIST1H4E", "HLA-A", 
+                   "HLA-B", "HSP90AB1", "ING1", "INPPL1", "INTS12", "IPO7", "IRF4", "IRF6", 
+                   "ITGB7", "ITPKB", "KEAP1", "KEL", "KLHL8", "LCTL", "LRRC17", "MAP3K1", 
+                   "MAP4K3", "MBD1", "MED23", "MGA", "MICALCL", "MLL", "MLL4", "MORC4", 
+                   "MPO", "MTOR", "MXRA5", "MYB", "MYCN", "MYOCD", "NBPF1", "NCOR1", "NSD1", 
+                   "NTN4", "NUP210L", "ODAM", "OMA1", "OTUD7A", "PAPD5", "PCBP1", "PDAP1", 
+                   "PDCD2L", "PDSS2", "PLCG2", "POLE", "POU2AF1", "POU2F2", "PPM1D", "PPP6C", 
+                   "QKI", "RAB40A", "RAC1", "RAD21", "RASA1", "RBM10", "RHEB", "RHOA", 
+                   "RIT1", "RPL5", "RPS15", "RPS2", "RSBN1L", "RUNX1", "RXRA", "SACS", 
+                   "SELP", "SEPT12", "SERPINB13", "SETDB1", "SFRS2", "SGK1", "SIRT4", 
+                   "SLC1A3", "SLC26A3", "SLC2A3", "SLC44A3", "SLC4A5", "SMAD2", "SMAD4", 
+                   "SMC1A", "SMC3", "SNX25", "SOS1", "SOX17", "SPEN", "SPOP", "STAG2", 
+                   "STK19", "STX2", "TAP1", "TBC1D12", "TBL1XR1", "TBX3", "TCEB1", "TCF7L2", 
+                   "TCP11L2", "TDRD10", "TGFBR2", "TIMM17A", "TNF", "TP53BP1", "TPX2", 
+                   "TRAF3", "TRIM23", "TTLL9", "TXNDC8", "WASF3", "ZFHX3", "ZNF180", 
+                   "ZNF454", "ZNF471", "ZNF483", "ZNF620", "ZNF750", "ZRANB3", "KMT2D", 
+                   "KMT2C")
+
+kegg_endocytosis <- c("ACAP1", "ACAP2", "ACAP3", "ADRB1", "ADRB2", "ADRB3", "AGAP1", "AGAP2", "AP2A1", 
+                      "AP2A2", "AP2B1", "AP2M1", "AP2S1", "ARAP1", "ARAP2", "ARAP3", "ARF6", "ARFGAP1", 
+                      "ARFGAP2", "ARFGAP3", "ARRB1", "ARRB2", "ASAP1", "ASAP2", "ASAP3", "CBL", "CBLB", 
+                      "CBLC", "CCR5", "CDC42", "CHMP1B", "CHMP2A", "CHMP2B", "CHMP3", "CHMP4A", "CHMP4B", 
+                      "CHMP4C", "CHMP5", "CHMP6", "CLTA", "CLTB", "CLTC", "CLTCL1", "CSF1R", "CXCR1", 
+                      "CXCR2", "CXCR4", "DAB2", "DNAJC6", "DNM1", "DNM1L", "DNM2", "DNM3", "EEA1", "EGF", 
+                      "EGFR", "EHD1", "EHD2", "EHD3", "EHD4", "EPN1", "EPN2", "EPN3", "EPS15", "ERBB3", 
+                      "ERBB4", "F2R", "FGFR2", "FGFR3", "FGFR4", "FLT1", "GIT1", "GIT2", "GRK1", "GRK2", 
+                      "GRK3", "GRK4", "GRK5", "GRK6", "GRK7", "HGS", "HLA-A", "HLA-B", "HLA-C", "HLA-E", 
+                      "HLA-F", "HLA-G", "HRAS", "HSPA1A", "HSPA1B", "HSPA1L", "HSPA2", "HSPA6", "HSPA8", 
+                      "IGF1R", "IL2RA", "IL2RB", "IL2RG", "IQSEC1", "IQSEC2", "IQSEC3", "ITCH", "KDR", 
+                      "KIT", "LDLR", "LDLRAP1", "MDM2", "MET", "MVB12A", "MVB12B", "NEDD4", "NEDD4L", 
+                      "NTRK1", "PARD3", "PARD6A", "PARD6B", "PARD6G", "PDCD6IP", "PDGFRA", "PIKFYVE", 
+                      "PIP4K2B", "PIP5K1A", "PIP5K1B", "PIP5K1C", "PLD1", "PLD2", "PRKCI", "PRKCZ", 
+                      "PSD", "PSD2", "PSD3", "PSD4", "RAB11A", "RAB11B", "RAB11FIP1", "RAB11FIP2", 
+                      "RAB11FIP3", "RAB11FIP4", "RAB11FIP5", "RAB22A", "RAB31", "RAB4A", "RAB5A", "RAB5B", 
+                      "RAB5C", "RABEP1", "RBSN", "RET", "RNF41", "RUFY1", "SH3GL1", "SH3GL2", "SH3GL3", 
+                      "SH3GLB1", "SH3GLB2", "SH3KBP1", "SMAP1", "SMAP2", "SMURF1", "SMURF2", "SNF8", "SRC", 
+                      "STAM", "STAM2", "STAMBP", "TFRC", "TRAF6", "TSG101", "USP8", "VPS25", "VPS28", 
+                      "VPS36", "VPS37A", "VPS37B", "VPS37C", "VPS37D", "VPS45", "VPS4A", "VPS4B", "VTA1", 
+                      "WWP1")
+
+TDXD_genes <- c("CDK12", "ESR1", "GATA3", "CUX1", "PPP2R1A", "KMT2D", "MAP3K1", 
+                "CDKN2A", "RB1", "PMS2", "NOTCH2", "PTEN", "PIK3R2", "MGA", 
+                "KMT2C", "ERBB3", "BRCA2", "ARID1A", "PTPRD", "FOXA1", "CIC", 
+                "CDK6", "CDH1", "BRCA1", 'SLX4', 'TOP2B')
+
+other_key_genes <- c("TACSTD2", "TOP1","MDR1", "CTSB", "FCGRT", "NECTIN4", "CAV1",
+                     "ABCB1", "ABCC1", "RAB5B", "RAB6A", "PAK4")
+
+cancer_related_genes <- union(cancer_gene_list, phylogic_list)
+adc_related_genes <- union(union(kegg_endocytosis,TDXD_genes), other_key_genes)
+gene_list <- sort(union(cancer_related_genes,adc_related_genes))
+print(length(gene_list))
+
+
+# CNV GENES
+cnv_gene_list <- c('MYC', 'NFIB', 'IRS2', 'E2F3', 'MYB', 'CCND1', 'CCNE1', 'EGFR', 
+                  'PTEN', 'CDKN2A', 'CHD1', 'RB1')
+
+# PROTECTED GENES MUST ALWAYS BE IN HEATMAP
+protected_genes <- c("TACSTD2", 'CAV1', 'PTEN', 'LIG1', 'SLX4', 'TOP2B', 'TP53', 'TOP1', 'PIK3CA', 'ABCB1')
+```
+
+## PATHWAYS
+```{r}
+pathway_data <- list(
+  "DNA Damage Response" = list(
+    genes = c("TP53", "BRCA1", "ATM", "ATR", "PRKDC", "SLX4", "CHEK2"),
+    relevance = "Response to cytotoxic payload"
+  ),
+  "Cell Surface & Receptors" = list(
+    genes = c("EGFR", "ERBB2", "EPHB6", "TACSTD2", "NOTCH1", "NOTCH2", "IGF2R", "LRP1B"),
+    relevance = "Target expression and binding"
+  ),
+  "Endocytosis & Trafficking" = list(
+    genes = c("CLTC", "PARD3", "PARD6B", "LDLRAP1", "VPS37D", "AGAP1", "ARAP3", "CAV1"),
+    relevance = "ADC internalization and processing"
+  ),
+  "Cell Survival Signaling" = list(
+    genes = c("AKT1", "PIK3R1", "PTEN", "RICTOR", "MAP3K1", "NF1", "PLCG2", "JAK1", "GNAS", "GRK6"),
+    relevance = "Response and resistance pathways"
+  ),
+  "Drug Response" = list(
+    genes = c("ABCB1", "TOP2B", "TOP1"),
+    relevance = "Drug processing and response"
+  ),
+  "Cell Cycle & Death" = list(
+    genes = c("RB1", "BCLAF1", "PPM1D", "MYC"),
+    relevance = "Cell fate decisions"
+  ),
+  "Gene Regulation" = list(
+    genes = c("CREBBP", "MED12", "MED23", "ZFHX3", "NCOR1", "SMAD2", "SPEN", "CBFB", "CIC", "NSD1", "CHD4"),
+    relevance = "Transcriptional control"
+  ),
+  "Other" = list(
+    genes = c("ANK3", "COL5A1", "COL5A3", "DDX5", "MICALCL", "DNAH12", "PTCH1", "PHOX2B", "SACS", "WWP1", "TBL1XR1", "IDH1"),
+    relevance = "Various functions"
+  )
+)
+
+# Convert to dataframe
+pathway_df <- data.frame(
+  Gene = unlist(lapply(names(pathway_data), function(p) pathway_data[[p]]$genes)),
+  Pathway = rep(names(pathway_data), sapply(pathway_data, function(x) length(x$genes))),
+  ADC_Relevance = unlist(lapply(names(pathway_data), function(p) rep(pathway_data[[p]]$relevance, length(pathway_data[[p]]$genes))))
+)
+
+rownames(pathway_df) <- pathway_df$Gene
+```
+
+## FUNCTION FOR CALCULATING CCF
+```{r}
+# FUNCTION FOR CCF CALCULATION
+calculate_ccf <- function(vaf, depth, purity, C){
+  # see DOI: 10.1126/scitranslmed.aaa1408
+  if (is.na(vaf) | is.na(C) ) return(c(NA, NA, NA))
+  
+  # ccf histogram
+  possible_ccfs <- seq(0.01, 1, 0.01)
+  vaf <- as.numeric(vaf)
+  depth <- as.numeric(depth) 
+  purity <- as.numeric(purity)
+  C <- as.numeric(C) 
+  possible_vafs <- (purity * possible_ccfs)/ ((2 * (1 - purity)) + (purity * C)) #Expected VAF for each CCF
+  possible_vafs <- pmax(pmin(possible_vafs, 1), 0)  
+  probs <- dbinom(x=round(vaf*depth), size = depth, prob = possible_vafs) #Prob of observed VAF
+  names(probs) <- possible_ccfs
+  if (!sum(probs)) {
+    if (vaf > max(possible_vafs)) return(c(1, 1, 1))
+    return(c(NA, NA, NA))
+  }
+  
+  # get mean ccf and upper/lower 95% bounds
+  probs_norm <- probs / sum(probs) #Normalise to get posterior distribution
+  probs_sort <- sort(probs_norm, decreasing = TRUE)
+  probs_cum <- cumsum(probs_sort)
+  n <- sum(probs_cum < 0.95) + 1 #Get 95% confidence interval (95% of probability)
+  threshold <- probs_sort[n]
+  cint  <- probs[probs_norm >= threshold]
+  ccf_point <- as.numeric(names(which.max(probs_norm)))
+  ccf_lower <- as.numeric(names(cint)[1])
+  ccf_upper <- as.numeric(names(cint)[length(cint)])
+  return(c(ccf_point, ccf_lower, ccf_upper))
+}
+
+```
+
+## LOAD VARIANTS
+```{r}
+# READ VARIANTS 
+variant_path <- '/Users/jacobg/Dropbox/shared_leif/Jacob/WES_2024/somatic/data/mutect2/combined/combined_somatic_mutations_annovar.csv.hg38_multianno.txt'
+df <- read.csv(variant_path,sep="\t") 
+df <- df %>% dplyr::rename("Hugo_Symbol" = "Gene.refGene")
+
+```
+
+# LOAD OTHER DATA SOURCES
+```{r}
+# READ OTHER DATASETS (METADATA, PURITY, HRD, RENAME)
+metadata <- read_excel("/Users/jacobg/Dropbox/shared_leif/Jacob/metadata/wes_meta_JG202504.xlsx")[1:50,]
+rownames(metadata) <- metadata$`new name`
+purities <- read.csv('/Users/jacobg/Dropbox/shared_leif/Jacob/WES_2024/copynumber/Data/purecn/purity_ploidy/purities.csv')
+TMB <- read_csv('/Users/jacobg/Dropbox/shared_leif/Jacob/WES_2024/somatic/data/TMB.csv')
+HRD <- read_csv('/Users/jacobg/Dropbox/shared_leif/Jacob/WES_2024/signatures/HRD_signatures.csv')
+new_names <- read_csv('/Users/jacobg/Dropbox/shared_leif/Jacob/metadata/name_conversion.csv') %>% filter(assay == 'WES')
+
+# ADD METADATA
+df$Patient <- sapply(strsplit(df$Tumor_Sample_Barcode, "_"), `[`, 1)
+df$Timing <- sapply(strsplit(df$Tumor_Sample_Barcode, "_"), `[`, 2)
+df$Response <- metadata$`post sg response`[match(df$Patient, rownames(metadata))]
+df$Purity <- purities$Purity[match(df$Tumor_Sample_Barcode, purities$Sampleid)]
+```
+
+## VARIANT PREPROCESSING AND FILTERING
+```{r}
+#COMPUTE VAF AND ADJUSTED VAF
+df$Vaf <- df$t_alt_count / df$t_depth
+df$Vaf_adjust <- df$Vaf / df$Purity
+
+# REMOVE VARIANTS FROM BAD SAMPLES
+low_purity_samples <-c("BIDMC2_pre", "BIDMC3_post", "BIDMC4_pre", "BIDMC4_post", "BIDMC5_post", "BIDMC6_pre",
+                       "BIDMC6_post", "BIDMC7_post", "DFC7_pre_FFT", "DFC9_pre", "DFC19_pre", "DFC12_post",
+                       "DFC19_pre", "DFC20_post", "DFC23_post", "MGH3_post", "MGH5_post", "MGNS4_pre", 
+                       "NWH2_pre_FFT", "MGNS5_post")
+redundant_fixed_samples <- c("DFC1_pre")
+low_coverage <- c('DFC19_post', "MGNS4_post", "BIDMC3_post", "DFC1_post")
+excluded_samples <- c(low_purity_samples, redundant_fixed_samples, low_coverage)
+df_analysis_set <- df %>% filter(!(Tumor_Sample_Barcode %in% excluded_samples))
+
+# FILTER VARIANTS BY MUTECT2 PASS AND VARIANT IMPACT 
+impact_variant_functions <- c("nonsynonymous SNV", "stopgain", "frameshift deletion", "nonframeshift deletion","stoploss",
+                              "nonframeshift substitution", "frameshift substitution", "startloss")
+df_analysis_set <- df_analysis_set %>% filter(FILTER == 'PASS', ExonicFunc.refGene %in% impact_variant_functions)
+
+# ADD MORE GENERAL MUTATION TYPES
+df_analysis_set <- df_analysis_set %>% 
+  mutate(mut_type = case_when(
+    ExonicFunc.refGene %in% c("frameshift deletion", "nonframeshift deletion") ~ "Small Deletion",
+    ExonicFunc.refGene %in% c("stopgain","stoploss","startloss") ~ "Nonsense SNV",
+    ExonicFunc.refGene %in% c("nonframeshift substitution", "frameshift substitution") ~ "Substitution",
+    ExonicFunc.refGene == "nonsynonymous SNV" ~ "Missense SNV",
+    TRUE ~ "none"
+  ))
+```
+
+
+
+## LOAD CNVS AND ADD THEM TO VARIANTS
+```{r}
+# LOAD CNVS
+cnv_path <- "/Users/jacobg/Dropbox/shared_leif/Jacob/WES_2024/copynumber/Data/purecn/segments/"
+file_list <- list.files(path = cnv_path, pattern = "*.seg", full.names = TRUE)
+df_list <- lapply(file_list, function(file) {read_delim(file, delim = "\t", show_col_types = FALSE)})
+cnv_df <- do.call(rbind, df_list)
+#cnv_df$C <- lapply(cnv_df$C, function(x) {min(x,6)}) # maybe we should not do this here
+cnv_df$chrom[cnv_df$chrom == 23] <- "X"
+
+df_analysis_set$copynumber <- NA
+prev_segment <- NULL
+prev_id <- NULL
+prev_chrom <- NULL
+
+# ASSIGN LOCAL CN TO EACH VARIANT
+for (i in 1:nrow(df_analysis_set)) {
+  variant <- df_analysis_set[i, ]
+  
+  # Check if the current variant belongs to the same segment as the previous variant
+  if (!is.null(prev_segment) &&
+      variant$Tumor_Sample_Barcode == prev_id &&
+      variant$Chr == prev_chrom &&
+      variant$Start >= prev_segment$loc.start &&
+      variant$Start <= prev_segment$loc.end) {
+    
+    # Assign the C value of the previous segment to the current variant
+    df_analysis_set$copynumber[i] <- prev_segment$C[[1]]
+    
+  } else {
+    # Find the matching segment for the current variant
+    segment <- cnv_df[cnv_df$ID == variant$Tumor_Sample_Barcode &
+                        cnv_df$chrom == variant$Chr &
+                        cnv_df$loc.start <= variant$Start &
+                        cnv_df$loc.end >= variant$Start, ]
+    
+    # Check if a matching segment is found
+    if (nrow(segment) > 0) {
+      df_analysis_set$copynumber[i] <- segment$C[[1]]
+      prev_segment <- segment
+      prev_id <- variant$Tumor_Sample_Barcode
+      prev_chrom <- variant$Chr
+    }
+  }
+}
+```
+
+## APPLY CCF TO VARIANTS
+```{r}
+# APPLY CCF CALCULATION
+ccf_cols <- t(apply(df_analysis_set, 1, function(row) {
+  calculate_ccf(vaf = row["Vaf"], 
+                depth = row["t_depth"], 
+                purity = row["Purity"], 
+                C = row["copynumber"])
+  }))
+colnames(ccf_cols) <- c("ccf", "ccf_lower", "ccf_upper")
+df_analysis_set <- cbind(df_analysis_set, as.data.frame(ccf_cols))
+
+```
+
+## FILTER STEP
+```{r}
+
+filtered_vars <- df_analysis_set %>% filter(t_depth > 10, n_depth >10,
+                                            Hugo_Symbol %in% c(gene_list, protected_genes),
+                                            #ccf >= 0)
+                                            Vaf > 0.05)
+```
+
+# CREATE LONG FORMAT TABLE FOR HEATMAP
+```{r}
+heatmap_data <- filtered_vars %>%
+  group_by(Tumor_Sample_Barcode, Hugo_Symbol) %>%
+  summarise(
+    ccf = max(ccf, na.rm = TRUE),
+    mut_type = if(n() > 1) {
+      mut_type[which.max(ccf)]
+    } else {
+      first(mut_type)
+    }
+  ) %>%
+  ungroup()
+
+```
+
+## PREPARE MATRIX + FILTER
+```{r}
+# REMOVE GENES WITH FEWER THAN 3 HITS WITH EXCEPTIONS
+heatmap_data <- heatmap_data %>%
+  group_by(Hugo_Symbol) %>%
+  filter(n() >= 2 | Hugo_Symbol %in% protected_genes) %>% # for no ccf or vaf filter
+  ungroup()
+
+ccf_matrix <- heatmap_data %>%
+  select(Tumor_Sample_Barcode, Hugo_Symbol, ccf) %>%
+  pivot_wider(names_from = Hugo_Symbol, values_from = ccf) %>%
+  column_to_rownames("Tumor_Sample_Barcode") %>%
+  as.matrix()
+
+exonic_matrix <- heatmap_data %>%
+  select(Tumor_Sample_Barcode, Hugo_Symbol, mut_type) %>%
+  pivot_wider(names_from = Hugo_Symbol, values_from = mut_type) %>%
+  column_to_rownames("Tumor_Sample_Barcode") %>%
+  as.matrix()
+
+
+# Add MGH4_pre to ccf_matrix if it doesn't exist
+if(!"MGH4_pre" %in% rownames(ccf_matrix)) {
+  new_row <- matrix(NA, nrow = 1, ncol = ncol(ccf_matrix))
+  colnames(new_row) <- colnames(ccf_matrix)
+  rownames(new_row) <- "MGH4_pre"
+  ccf_matrix <- rbind(ccf_matrix, new_row)
+}
+
+# Add MGH4_pre to exonic_matrix if it doesn't exist
+if(!"MGH4_pre" %in% rownames(exonic_matrix)) {
+  new_row <- matrix(NA, nrow = 1, ncol = ncol(exonic_matrix))
+  colnames(new_row) <- colnames(exonic_matrix)
+  rownames(new_row) <- "MGH4_pre"
+  exonic_matrix <- rbind(exonic_matrix, new_row)
+}
+
+# Get unique ExonicFunc values
+exonic_funcs <- unique(as.vector(exonic_matrix))
+exonic_funcs <- exonic_funcs[!is.na(exonic_funcs)]
+
+
+color_palette <- c('Missense SNV' = "#00AF66FF",
+                   'Small Deletion' = "#7C878EFF",
+                   'Nonsense SNV' = "#00B5E2FF"#,
+                   #'Substitution' = 'goldenrod' # not always needed
+                   ) 
+```
+
+# MODIFY EXTERNAL DATA SOURCES TO MATCH HEATMAP
+
+## MODIFY METADATA SO THAT ONLY TUMORS IN FINAL CROSSTAB ARE KEPT
+```{r}
+meta_wes <- metadata %>% filter(!is.na(`wes tumor pre`) | !is.na(`wes tumor sg`) | !is.na(`wes extra FFT`))
+tumor_meta <- meta_wes %>% pivot_longer(cols = c(`wes tumor pre`, `wes tumor sg`, `wes extra FFT`), names_to = "timing", values_to = "tumor") %>% 
+  drop_na(tumor) %>%
+  select(c(`new name`,timing,tumor,`post sg response`, `final response(surgery)`, `wes pre plotname`, `wes post plotname`)) %>%
+  dplyr::rename('patient' = `new name`, 'sg_response' = `post sg response`, 'final_response' = `final response(surgery)` )
+
+
+
+tumor_meta <- tumor_meta %>%
+  mutate(timing = case_when(
+    timing == 'wes tumor pre' ~ 'pre',
+    timing == 'wes extra FFT' ~ 'pre',
+    timing == 'wes tumor sg' ~ 'post',
+    TRUE ~ timing 
+  ))
+tumor_meta <- tumor_meta %>% filter(tumor %in% rownames(ccf_matrix))
+tumor_meta$cohort <- paste(tumor_meta$timing, tumor_meta$sg_response, sep = "_")
+rownames(tumor_meta) <- tumor_meta$tumor
+tumor_meta <- tumor_meta[rownames(ccf_matrix), ]
+```
+
+
+## MODIFY PURITIES AND HRD SO THAT ONLY TUMORS IN FINAL HEATMAP ARE KEPT
+```{r}
+purities <- purities %>% filter(Sampleid %in% rownames(ccf_matrix))
+rownames(purities) <- purities$Sampleid
+purities <- purities[rownames(ccf_matrix), ]
+
+# MODIFY HRD TO YES/NO
+HRD <- HRD %>% filter(Samples %in% rownames(ccf_matrix))
+rownames(HRD) <- HRD$Samples
+HRD <- HRD[rownames(ccf_matrix), ]
+HRD$HRD_CNV <- ifelse(HRD$HRD_CNV == 0, "No", "Yes")
+```
+
+## COMPUTE GENE COUNTS
+```{r}
+gene_counts <- colSums(!is.na(ccf_matrix))
+gene_df <- data.frame(
+  gene = colnames(ccf_matrix),
+  count = gene_counts
+) %>% arrange(desc(count))  # Sort by pathway and then by mutation count
+
+gene_order <- match(gene_df$gene, colnames(ccf_matrix))
+ccf_matrix_sorted <- ccf_matrix[, gene_order]
+exonic_matrix_sorted <-exonic_matrix[, gene_order]
+
+```
+
+# GENE NAME AND PATHWAY ANNOTATIONS
+```{r}
+Gene_Name = anno_text(
+  which = "row",
+  gene_df$gene,
+  gp = gpar(fontsize = 7),
+)
+```
+
+# GENE FREQUENCIES BY SAMPLE GROUP
+```{r}
+# GENE FREQUENCIES PER COHORT
+# Calculate number of samples per cohort
+cohort_sizes <- tumor_meta %>%
+  count(cohort) %>%
+  deframe()  # converts to named vector
+
+# Calculate mutation fractions per cohort
+mutation_data <- ccf_matrix %>%
+  as.data.frame() %>%
+  rownames_to_column("tumor") %>%
+  pivot_longer(
+    -tumor,
+    names_to = "gene",
+    values_to = "ccf"
+  ) %>%
+  left_join(
+    tumor_meta %>% select(tumor, cohort),
+    by = "tumor"
+  )
+
+# Calculate fraction of samples with mutation in each cohort
+mutation_fractions <- mutation_data %>%
+  group_by(cohort, gene) %>%
+  summarize(
+    count = sum(!is.na(ccf)),
+    .groups = "drop"
+  ) %>%
+  # Calculate fraction
+  group_by(gene) %>%
+  mutate(
+    fraction = count / cohort_sizes[cohort]
+  ) %>%
+  # Join with gene order information
+  left_join(
+    tibble(
+      gene = rownames(t(ccf_matrix_sorted)),
+      gene_idx = 1:length(rownames(t(ccf_matrix_sorted)))
+    ),
+    by = "gene"
+  ) %>%
+  arrange(gene_idx) %>%
+  # Pivot to get cohort-specific fraction columns
+  select(-count, -gene_idx) %>%
+  pivot_wider(
+    names_from = cohort,
+    values_from = fraction
+  ) %>%
+  column_to_rownames("gene") %>%
+  as.matrix()
+
+mutation_fractions <- mutation_fractions[, c('pre_pCR', 'pre_RD')]
+max_frac <- max(mutation_fractions)
+```
+
+
+
+# TMB
+```{r}
+bar_annotation <- anno_barplot(TMB$TMB)
+```
+
+## LEGENDS
+```{r}
+Legend_SampleGroup <- Legend(
+  title = "Sample Group",
+  labels = c("pre-pCR", "pre-RD", "post-RD"),
+  legend_gp = gpar(fill = c("#CC0C00FF", "#5C88DAFF", "#FFCD00FF"))
+)
+
+Legend_HRDGermline <- Legend(
+  title = "HRD Germline Mutation",
+  labels = c("none", "BRCA1", "BRCA2", "PALB2"),
+  legend_gp = gpar(fill = c("grey", "violet","purple", "pink"))
+)
+
+Legend_HRDCNV <- Legend(
+  title = "HRD CNV Signature",
+  labels = c("No", "Yes"),
+  legend_gp = gpar(fill = c("grey", "black"))
+)
+
+Legend_Purity <- Legend(
+  title = "Tumor Purity",
+  col_fun = colorRamp2(c(0, 1), c("white","coral4")),
+  at = c(0, 1),
+  labels = c("0", "1"),
+  #legend_gp = gpar(fill = c("white", "coral4"))
+)
+
+Legend_Ploidy <- Legend(
+  title = "Tumor Ploidy",
+  col_fun = colorRamp2(c(0, 2, 6), c("blue","white","red")),
+  at = c(0, 2, 6),
+  labels = c("0", "2", "6"),
+  #legend_gp = gpar(fill = c("blue", "white", "red"))
+)
+
+Legend_Exonic <- Legend(
+  labels = names(color_palette), 
+  title = "Mutaton Type", 
+  legend_gp = gpar(fill = color_palette)
+  )
+
+
+Legend_CCF <- Legend(
+  title = "Cancer Cell Fraction",
+  at = c(0,1),
+  labels = c("0","1"),
+  col_fun = colorRamp2(c(0, 1), c("white","black"))
+)
+
+
+lgd_list <- list(
+  Legend_SampleGroup,
+  Legend_HRDGermline,
+  Legend_HRDCNV,
+  Legend_Purity,
+  Legend_Ploidy,
+  Legend_Exonic,
+  Legend_CCF
+)
+```
+
+## RENAMING
+```{r}
+# gets index in tumor_meta of rowname of ccf matrix, and matches to plotname based on timing
+for (i in seq_along(rownames(ccf_matrix_sorted))) {
+  old_name <- rownames(ccf_matrix_sorted)[i]
+  idx <- which(tumor_meta$tumor == old_name)
+  
+  if (length(idx) > 0) {
+    if (tumor_meta$timing[idx] == "pre") {
+      new_name <- tumor_meta$`wes pre plotname`[idx]
+    } else if (tumor_meta$timing[idx] == "post") {
+      new_name <- tumor_meta$`wes post plotname`[idx]
+    } else {
+      new_name <- old_name
+    }
+  } else {
+    new_name <- old_name
+  }
+  
+  # Update row names in both matrices
+  rownames(ccf_matrix_sorted)[i] <- new_name
+  rownames(exonic_matrix_sorted)[i] <- new_name
+}
+
+```
+
+# CCF CELL COLORING FUNCTION
+```{r}
+# Function to create color spectra
+create_color_spectra <- function(color_palette, n = 100) {
+  lapply(color_palette, function(color) {
+    colorRampPalette(c("white", color))(n)
+  })
+}
+color_spectra <- create_color_spectra(color_palette)
+
+
+# Updated cell_fun to use the color spectra and respect white borders
+cell_fun <- function(j, i, x, y, width, height, fill) {
+  exonic <- t(exonic_matrix_sorted)[i, j]
+  ccf <- t(ccf_matrix_sorted)[i, j]
+  if (!is.na(exonic) && !is.na(ccf)) {
+    ccf <- pmin(pmax(ccf, 0), 1) # Ensure CCF is within [0, 1] range
+    spectrum <- color_spectra[[exonic]] # Get the color spectrum for this mutation type
+    color_index <- round((0.25 + ccf * 0.75) * (length(spectrum) - 1)) + 1 # Select color based on CCF
+    adjusted_color <- spectrum[color_index]
+    
+    # Draw the cell with the adjusted color
+    grid.rect(x = x, y = y, width = width, height = height,
+              gp = gpar(fill = adjusted_color, col = NA))
+    
+    # Draw white borders
+    grid.rect(x = x, y = y, width = width, height = height,
+              gp = gpar(fill = NA, col = "white", lwd = 1))
+  } 
+  else {
+    grid.rect(x = x, y = y, width = width, height = height,
+              gp = gpar(fill = "grey96", col = "white", lwd = 1))
+  }
+}
+```
+
+# PLOT HEATMAP
+```{r}
+# CREATE AND PLOT COMPLEX HEATMAP
+heatmap_obj <- Heatmap(
+  t(ccf_matrix_sorted),
+  name = 'Cancer Cell Fraction',
+  column_title = "Samples",
+  row_title = "Genes",
+  column_names_side = "top",
+  row_names_side = "right",
+  show_row_names = FALSE,
+  column_names_gp = gpar(fontsize = 9),
+  row_names_gp = gpar(fontsize = 7),
+  rect_gp = gpar(col = "white", lwd = 1),
+  cell_fun = cell_fun,
+  #col = #color_fun, #colormap,
+  show_heatmap_legend = FALSE,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  column_order = sort(colnames(t(ccf_matrix_sorted))),
+  column_split = factor(tumor_meta$cohort, levels =  c('pre_pCR', 'post_pCR', 'pre_RD', 'post_RD')),
+  #row_gap = unit(3, "mm"),
+  border = TRUE,
+  top_annotation = HeatmapAnnotation(
+    which = "column",
+    annotation_name_gp = gpar(fontsize = 8),
+    # `Sample Group` = anno_simple(tumor_meta$cohort, height = unit(3, "mm"), 
+    #                            col = c('pre_pCR' = 'lightgreen', 'post_pCR' = 'seagreen', 'pre_RD' = 'orange', 'post_RD' = 'red')),
+    `Sample Group` = anno_simple(tumor_meta$cohort, height = unit(3, "mm"), 
+                               col = c('pre_pCR' = '#CC0C00FF', 'pre_RD' = '#5C88DAFF', 'post_RD' = '#FFCD00FF')),
+    `HRD Germline Mutation` = anno_simple(as.character(HRD$HRD_germline_type), height = unit(3, "mm"), 
+                                        #col = c('none' = 'grey', 'BRCA' = 'violet', 'non-BRCA' = 'pink')),
+                                        col = c('none' = 'grey', 'BRCA1' = 'violet', 'BRCA2'= 'purple', 'non-BRCA' = 'pink')),
+    `HRD CNV Signature` = anno_simple(as.character(HRD$HRD_CNV), height = unit(3, "mm"),
+                                    col = c('No' = 'grey', 'Yes' = 'black')),
+    `Tumor Purity` = anno_simple(as.numeric(purities$Purity), height = unit(3, "mm"),
+                               col = colorRamp2(c(0,1), c('white', 'coral4'))),
+    `Tumor Ploidy` = anno_simple(as.numeric(purities$Ploidy), height = unit(3, "mm"),
+                               col = colorRamp2(c(0,2,6), c('blue','white', 'red'))),
+    #`Mutation Type` = bar_annotation
+    `TMB (Mut / MB)` = bar_annotation
+  ),
+  left_annotation = rowAnnotation(
+    `pre-pCR` = anno_numeric(mutation_fractions[, "pre_pCR"], bg_gp = gpar(fill = "#CC0C00FF"), labels_gp = gpar(fontsize = 8, fontface = "bold"),
+                           labels_format = function(x) paste0(sprintf("%.1f", x*100), "%"), labels_offset = unit(8, "mm"), align_to='right'),
+    `pre-RD` = anno_numeric(mutation_fractions[, "pre_RD"], bg_gp = gpar(fill = "#5C88DAFF"), labels_gp = gpar(fontsize = 8, fontface = "bold"),
+                          labels_format = function(x) paste0(sprintf("%.1f", x*100), "%"), labels_offset = unit(8, "mm"), align_to='left'),
+    Gene_Name = Gene_Name,
+    annotation_name_side = 'top'
+  )
+)
+
+draw(heatmap_obj, ht_gap = unit(7, "mm"), annotation_legend_list = packLegend(list = lgd_list), align_heatmap_legend = "heatmap_center")
+```
+
+## SAVE MUTATION TABLE
+```{r}
+
+# SAVE MUTATIONS IN HEATMAP DATA AS SUPPLIMENTARY TABLE
+
+mut_table <- heatmap_data %>% 
+  mutate(combined_value = paste(mut_type, ccf, sep = " | ")) %>%
+  pivot_wider(
+    id_cols = Tumor_Sample_Barcode,
+    names_from = Hugo_Symbol,
+    values_from = combined_value
+  )
+write_csv(mut_table, "/Users/jacobg/Dropbox/shared_leif/neoSTAR A1 manuscript prep/exome_Jacob/tables/mutation_table.csv")
+```
+
