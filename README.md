@@ -4,7 +4,7 @@
 
 Ting Liu, Jia-Ren Lin, Jacob Geisberg, Bogang Wu, Laura M. Spring, Veerle Bossuyt, Simona Cristea, Rachel Occhiogrosso Abelman, Nayana Thimmiah, Isabella Vianna, Ilze Smidt, Nicole Peiris, James Coates, Siang-Boon Koh, A. C. Garrido-Castro, F. Lynce, N. Tung, Sara Tolaney, Aditya Bardia, Franziska Michor, Sandro Santagata, and Leif W. Ellisen
 
-<img src="./docs/KidneyDiagnosticManuscript-landingPage.png" style="max-width:500px;width:100%"/>
+<img src="./docs/NeoSTAR_2026_landing_page.png" style="max-width:500px;width:100%"/>
 
 ## SUMMARY
 
