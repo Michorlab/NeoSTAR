@@ -12,7 +12,7 @@ Antibody drug conjugates (ADCs) are complex therapeutics that have revolutionize
 
 ## ACCESS THE DATA
 
-Example images can be accessed through Harvard tissue Atlas website . Cell count tables have been released via Github ([https://github.com/labsyspharm/Chen-Santagata-Kidney-2026](https://github.com/Michorlab/NeoSTAR/)). Pathology scores and Orion quantifications are on Google Sheets and referenced in the relevant scripts directly. Additional images and data will be provide upon request.
+Example images can be accessed through Harvard tissue Atlas website . Cell count tables have been released via Github (https://github.com/Michorlab/NeoSTAR/). Pathology scores and Orion quantifications are on Google Sheets and referenced in the relevant scripts directly. Additional images and data will be provide upon request.
 
 ## Codes for imaging data processing
 
