@@ -1016,10 +1016,13 @@ ggsave("output/FigS6F.lower_B_annot_markers_Dotplot.pdf", p, width = 12, height 
 ################################################################################
 #  Fig.S6G — Myeloid cell UMAP (upper left) + density by group (upper right) + dotplot of annotation markers (lower)
 ################################################################################
-
-scRNA_M <- readRDS("data/M_DC_seurat.rds")#this version comes from 20250423
+## here ##
+  
+scRNA_M <- readRDS("M_DC_seurat.rds")#this version comes from 20250423
 scRNA <- scRNA_M
 head(scRNA@meta.data)
+
+table(scRNA@meta.data$Celltype_subset)
 
 #re-organize sample and group ID
 sample.group<-read.csv("data/sample_group.csv",header=T)
@@ -1571,7 +1574,7 @@ for (i in 1:ncol(signature.matrix)) {
     ylab("Score") +
     xlab(NULL) +
     ggtitle(colnames(signature.matrix)[i]) +
-    theme_classic(base_size = 11) +
+    theme_classic(base_size = 11) 
     theme(
       plot.title = element_text(hjust = 0.5, face = "bold", size = 11),
       axis.text.x = element_text(size = 9, face = "bold"),
@@ -1586,7 +1589,6 @@ for (i in 1:ncol(signature.matrix)) {
       size = 3.5
     )
 }
-
 
 signature.score.plot <- wrap_plots(plots = plots, ncol = 3)
 ggsave("output/Fig3C_CD8T_boxplots.pdf", signature.score.plot, width = 10, height = 6)

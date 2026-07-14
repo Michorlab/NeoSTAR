@@ -980,119 +980,132 @@ signature.score.plot <- wrap_plots(plots = plots, ncol=4)
 signature.score.plot
 ggsave("output/MP4_sample_boxplot_TNBCsubtype.pdf", plot = signature.score.plot, width = 22, height = 7)
 
-#### LOGESTIC REGRESSION ####
-str(scRNA.origin, max.level = 2)
-colnames(scRNA.origin@meta.data)
-colnames(scRNA.cancer@meta.data)
 
-library(readxl)
-clinical <- read_excel("~/Documents/Ting Data/Table S1_baseline clinical characteristics.xlsx")
-head(clinical)
-colnames(clinical)
 
-unique(scRNA.cancer@meta.data$new_group)
-table(scRNA.cancer@meta.data$new_group)
+########################################
+#
+# Isabella's additions, June-July 2026
+#
+# Figure + statistics code for the TNBC scRNA-seq manuscript revision.
+# Every section is self-labeled with the output file it writes.
+#
+# Objects assumed already loaded in the session:
+#   scRNA.origin  - all cells, annotated (Celltype_Minor / Celltype_Subset, UPPERCASE "S")
+#   scRNA.cancer  - epithelial/cancer cells, carries the MP metaprogram scores
+#   M_DC_seurat.rds - myeloid/DC compartment, loaded below (Celltype_subset, lowercase "s")
+#
+# Recurring gotchas this script guards against:
+#   - AnnotationDbi masks dplyr::select / dplyr::filter  -> conflicted + explicit reassignment
+#   - Celltype_Subset (all-cell object) vs Celltype_subset (myeloid object) differ in case
+#   - new_group has FOUR levels (pre-pCR, pre-RD, post-pCR, post-RD); pre-treatment must be
+#     filtered EXPLICITLY, not just by setting factor levels (that silently makes post- cells NA)
+#   - subsetting a factor keeps unused levels -> wilcox.test errors on >2 groups; droplevels() it
+#
+########################################
 
-unique(scRNA.cancer@meta.data$new_id_4) |> head(20)
 
-# 1. Pull metadata and filter to pre-treatment only
-meta <- scRNA.cancer@meta.data %>%
-  filter(new_group %in% c("pre-pCR", "pre-RD"))
-
-# 2. Aggregate MP scores per patient (mean across cells)
-patient_df <- meta %>%
-  group_by(new_id_4, new_group) %>%
-  summarise(
-    MP_11 = mean(MP_11, na.rm = TRUE),
-    MP_22 = mean(MP_22, na.rm = TRUE),
-    MP_33 = mean(MP_33, na.rm = TRUE),
-    MP_44 = mean(MP_44, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  mutate(pCR = ifelse(new_group == "pre-pCR", 1, 0))
-
-# 3. Sanity Check
-table(patient_df$pCR)
-
-# 4. Logistic regression
-library(logistf)
-model_firth <- logistf(pCR ~ MP_11 + MP_22 + MP_33 + MP_44,
-                       data = patient_df)
-summary(model_firth)
-head(patient_df)
-table(patient_df$pCR)
-
-#possibly need to be corrected (p values)
-# 5. testing correlation 
-mp_cols <- c("MP_11", "MP_22", "MP_33", "MP_44")
-
-pvals <- sapply(mp_cols, function(mp) {
-  wilcox.test(patient_df[[mp]] ~ patient_df$pCR)$p.value
-})
-
-pvals
-
+### Setup: libraries, dplyr conflict handling, output folder ###
+library(Seurat)
+library(dplyr)
+library(tidyr)
+library(tibble)
 library(ggplot2)
+library(patchwork)
+library(scales)           # hue_pal(), percent_format()
+library(readxl)
+library(logistf)          # Firth-penalized logistic regression (small-n safe)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+library(ggbeeswarm)
+library(ggpubr)           # ggboxplot() + stat_compare_means() for the Fig 3C-style panels
+library(ggrepel)
 
-ggplot(patient_df, aes(x = factor(pCR, labels = c("RD", "pCR")), 
-                       y = MP_22, 
-                       fill = factor(pCR, labels = c("RD", "pCR")))) +
-  geom_boxplot(outlier.shape = NA, alpha = 0.6) +
-  geom_jitter(width = 0.1, size = 3, alpha = 0.8) +
-  scale_fill_manual(values = c("RD" = "#4575b4", "pCR" = "#d73027")) +
-  labs(
-    title = "MP_22 score by treatment response",
-    subtitle = paste0("RD n=", sum(patient_df$pCR==0), ", pCR n=", sum(patient_df$pCR==1)),
-    x = "Response",
-    y = "MP_22 score (patient mean)",
-    fill = "Response"
-  ) +
-  theme_classic() +
-  theme(legend.position = "none")
-ggsave("output/MP22_by_response.pdf", width = 4, height = 5)
+# Force dplyr verbs to win over AnnotationDbi / S4 masking.
+# Without this, select()/filter() silently dispatch to the wrong method and throw
+# "unable to find an inherited method" errors mid-pipeline.
+library(conflicted)
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("count",  "dplyr")
+select <- dplyr::select
+filter <- dplyr::filter
+
+dir.create("output", showWarnings = FALSE)
+
+# Shared palette used across every figure: pCR / M1 = red, RD / M2 = blue
+group_colors <- c("pre-pCR" = "#CC0C00FF", "pre-RD" = "#5C88DAFF")
 
 
+### CD8+ shared data objects (metadata + expression, pre-treatment only) ###
+# Built once here, reused by every CD8 figure below. Pre-treatment only throughout:
+# the post-treatment groups are a different question and are not part of these figures.
 
-#### PIE CHART AND BOX PLOTS #####
-ls()[grep("CD8|T.cell|Tcell|immune", ls(), ignore.case = TRUE)]
-unique(scRNA.origin@meta.data$Celltype_Minor)
-
-
-# Check for separate CD8 object
-ls()[grep("CD8|cd8", ls(), ignore.case = TRUE)]
-
-# Check Celltype_Subset for CD8 cluster labels (c0, c1, c2 etc)
-scRNA.origin@meta.data %>%
-  filter(Celltype_Minor == "CD8+T cell") %>%
-  pull(Celltype_Subset) %>%
-  unique()
-
-# Subset to CD8T cells, pre-treatment only
+# CD8+ cell metadata
 cd8_meta <- scRNA.origin@meta.data %>%
   filter(Celltype_Minor == "CD8+T cell",
-         new_group %in% c("pre-pCR", "pre-RD"))
+         new_group %in% c("pre-pCR", "pre-RD")) %>%
+  mutate(new_group = droplevels(factor(new_group)))   # drop post- levels or wilcox.test sees 4 groups
 
-# Get cluster order and assign colors
+# Marker expression per cell. new_id_4 (patient/sample ID) is carried through so the
+# patient-level views can aggregate without re-fetching.
+genes <- c("IFNG", "TNF", "GZMK", "GZMB", "GZMH", "MKI67")
+
+expr_df <- FetchData(scRNA.origin,
+                     vars = c("Celltype_Minor", "Celltype_Subset",
+                              "new_group", "new_id_4", genes)) %>%
+  rownames_to_column("cell_id") %>%
+  filter(Celltype_Minor == "CD8+T cell",
+         new_group %in% c("pre-pCR", "pre-RD")) %>%
+  mutate(new_group = droplevels(factor(new_group)))
+
+# Long form, one row per cell x gene. The CD8T_ prefix is stripped so cluster labels
+# fit on an axis; downstream regexes are written to tolerate its presence or absence.
+expr_long <- expr_df %>%
+  pivot_longer(all_of(genes), names_to = "gene", values_to = "expression") %>%
+  mutate(cluster = gsub("CD8T_", "", Celltype_Subset),
+         cluster = factor(cluster, levels = sort(unique(cluster))))
+
+# Patient-level means, one row per patient x gene.
+# This is the pseudoreplication fix: tests run on n = patients, not n = cells.
+expr_long_patient <- expr_df %>%
+  pivot_longer(all_of(genes), names_to = "gene", values_to = "expression") %>%
+  group_by(new_id_4, new_group, gene) %>%
+  summarise(expression = mean(expression, na.rm = TRUE), .groups = "drop")
+
+# Pooled per-cluster summary for the dot plot: mean expression, % of cells expressing,
+# and a per-gene z-score across clusters (so colors are comparable down a column).
+dotplot_df <- expr_long %>%
+  group_by(gene, cluster) %>%
+  summarise(mean_expr   = mean(expression, na.rm = TRUE),
+            pct_express = mean(expression > 0, na.rm = TRUE),
+            .groups = "drop") %>%
+  group_by(gene) %>%
+  mutate(z_score = as.numeric(scale(mean_expr))) %>%
+  ungroup()
+
+# Per-response subset proportions + the paper's UMAP palette (feeds pie + stacked bar)
 cd8_clusters <- unique(cd8_meta$Celltype_Subset)
-n_clusters <- length(cd8_clusters)
-
 umapColor <- c('#E5D2DD', '#53A85F', '#F1BB72', '#F3B1A0', '#D6E7A3', '#57C3F3', '#476D87',
                '#E95C59', '#E59CC4', '#AB3282', '#23452F', '#BD956A', '#8C549C', '#585658',
                '#9FA3A8', '#E0D4CA', '#5F3D69', '#C5DEBA', '#58A4C3', '#E4C755', '#F7F398',
                '#AA9A59', '#E63863', '#E39A35', '#C1E6F3', '#6778AE', '#91D0BE', '#B53E2B',
                '#712820', '#DCC1DD', '#CCE0F5', '#CCC9E6', '#625D9E', '#68A180', '#3A6963',
                '#968175', '#FF7F0E', '#1F77B4', '#2CA02C', '#D62728', '#9467BD')
+cluster_colors <- setNames(umapColor[seq_along(cd8_clusters)], sort(cd8_clusters))
 
-cluster_colors <- setNames(umapColor[1:n_clusters], sort(cd8_clusters))
-
-# Calculate proportions per group
 cd8_prop <- cd8_meta %>%
   group_by(new_group, Celltype_Subset) %>%
-  summarise(n = n(), .groups = "drop") %>%
+  summarise(n = dplyr::n(), .groups = "drop") %>%
   group_by(new_group) %>%
-  mutate(prop = n / sum(n))
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
 
-# --- Pie chart ---
+
+### CD8+ subset composition: pie chart -> output/CD8T_subset_piechart.pdf ###
+# Pooled (cell-level) proportions, one pie per response group. Descriptive only --
+# the statistics for composition live in the dumbbell figure further down, which
+# tests per-patient proportions rather than pooled cell counts.
 p_pie <- ggplot(cd8_prop, aes(x = "", y = prop, fill = Celltype_Subset)) +
   geom_col(width = 1, color = "white", linewidth = 0.3) +
   coord_polar("y") +
@@ -1104,8 +1117,12 @@ p_pie <- ggplot(cd8_prop, aes(x = "", y = prop, fill = Celltype_Subset)) +
         strip.text = element_text(size = 12, face = "bold"),
         plot.title = element_text(hjust = 0.5, face = "bold"))
 
-# --- Stacked bar ---
-p_bar_comp <- ggplot(cd8_prop, aes(x = new_group, y = prop, fill = Celltype_Subset)) +
+ggsave("output/CD8T_subset_piechart.pdf", plot = p_pie, width = 12, height = 6)
+
+
+### CD8+ subset composition: stacked bar -> output/CD8T_subset_stackedbar.pdf ###
+# Same data as the pie chart, easier to read across groups. Also descriptive.
+p_stacked <- ggplot(cd8_prop, aes(x = new_group, y = prop, fill = Celltype_Subset)) +
   geom_col(width = 0.7, color = "white", linewidth = 0.3) +
   scale_fill_manual(values = cluster_colors) +
   scale_y_continuous(labels = scales::percent_format(), expand = c(0, 0)) +
@@ -1115,25 +1132,122 @@ p_bar_comp <- ggplot(cd8_prop, aes(x = new_group, y = prop, fill = Celltype_Subs
   theme(legend.position = "right",
         axis.text.x = element_text(size = 11, face = "bold"),
         axis.text.y = element_text(size = 10),
-        axis.title = element_text(size = 12),
-        plot.title = element_text(hjust = 0.5, face = "bold", size = 13),
+        axis.title  = element_text(size = 12),
+        plot.title  = element_text(hjust = 0.5, face = "bold", size = 13),
         panel.grid.major.y = element_line(linetype = "dashed", color = "grey85"))
 
+ggsave("output/CD8T_subset_stackedbar.pdf", plot = p_stacked, width = 7, height = 6)
 
-# --- Boxplot by cluster ---
+
+### CD8+ subset compositional shift: per-patient Wilcoxon (BH) dumbbell -> output/CD8T_compositional_shift.pdf ###
+# Answers the reviewer's pseudoreplication concern for composition: the DOTS are pooled
+# proportions (what the reader wants to see), but the STARS come from per-patient
+# proportions, so the test has n = patients rather than n = cells.
+# Result: nothing survives BH correction (all ns) -- see da_stats.
+
+# Lineage-based cluster order, shared with the heatmap + stacked bar so the three figures
+# list clusters identically. Regex tolerates the CD8T_ prefix being present or stripped.
+raw_clusters  <- unique(as.character(cd8_meta$Celltype_Subset))
+lineage_of    <- sub("^.*c[0-9]+_([A-Za-z0-9]+)_.*$", "\\1", raw_clusters)
+lin_levels    <- c("Tnaive", "Tem", "Tpex", "Tnk", "Tcyc")
+cluster_order <- raw_clusters[order(factor(lineage_of, levels = lin_levels),
+                                    as.integer(sub("^.*c([0-9]+)_.*", "\\1", raw_clusters)))]
+
+# Pooled proportions (the plotted points)
+pooled <- cd8_meta %>%
+  group_by(new_group, Celltype_Subset) %>%
+  summarise(n = dplyr::n(), .groups = "drop") %>%
+  group_by(new_group) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+# Per-patient proportions -> the statistics.
+# complete() 0-fills subsets a patient lacks entirely: a true 0% is data, not a missing row,
+# and dropping those rows would bias the test toward patients who happen to have the subset.
+per_pt <- cd8_meta %>%
+  group_by(new_group, new_id_4, Celltype_Subset) %>%
+  summarise(n = dplyr::n(), .groups = "drop") %>%
+  group_by(new_group, new_id_4) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup() %>%
+  complete(nesting(new_group, new_id_4), Celltype_Subset,
+           fill = list(n = 0, prop = 0))
+
+# Wilcoxon per subset, BH-corrected across the 11 subsets.
+# tryCatch guards subsets where one group is entirely 0 (test undefined -> NA, not an error).
+da_stats <- per_pt %>%
+  group_by(Celltype_Subset) %>%
+  summarise(
+    p = tryCatch(wilcox.test(prop ~ new_group)$p.value, error = function(e) NA_real_),
+    .groups = "drop") %>%
+  mutate(
+    padj = p.adjust(p, method = "BH"),
+    star = case_when(is.na(padj) ~ "",
+                     padj < 0.001 ~ "***", padj < 0.01 ~ "**",
+                     padj < 0.05  ~ "*",   TRUE ~ "ns"))
+
+print(da_stats)   # exact FDRs for the manuscript text
+
+# Wide frame for the dumbbell: one row per subset, pCR and RD proportions side by side
+plot_df <- pooled %>%
+  select(new_group, Celltype_Subset, prop) %>%
+  pivot_wider(names_from = new_group, values_from = prop, values_fill = 0) %>%
+  left_join(da_stats, by = "Celltype_Subset") %>%
+  mutate(
+    Celltype_Subset = factor(Celltype_Subset, levels = rev(cluster_order)),  # rev: ggplot y-axis is bottom-up
+    direction = ifelse(`pre-RD` >= `pre-pCR`, "up in RD", "down in RD"),
+    xmax = pmax(`pre-pCR`, `pre-RD`))                                        # star sits past the further dot
+
+p_shift <- ggplot(plot_df, aes(y = Celltype_Subset)) +
+  # Arrow runs pCR -> RD, so its direction reads as "what happens in non-responders"
+  geom_segment(aes(x = `pre-pCR`, xend = `pre-RD`,
+                   yend = Celltype_Subset, color = direction),
+               linewidth = 1.1,
+               arrow = arrow(length = unit(0.10, "cm"), type = "closed")) +
+  geom_point(aes(x = `pre-pCR`), color = "#CC0C00FF", size = 3.2) +
+  geom_point(aes(x = `pre-RD`),  color = "#5C88DAFF", size = 3.2) +
+  geom_text(aes(x = xmax + 0.012, label = star),
+            hjust = 0, fontface = "bold", size = 4.2, na.rm = TRUE) +
+  scale_color_manual(values = c("up in RD" = "#5C88DAFF",
+                                "down in RD" = "#CC0C00FF"), name = "Shift") +
+  scale_x_continuous(labels = scales::percent_format(),
+                     expand = expansion(mult = c(0.02, 0.12))) +   # right headroom for the stars
+  labs(
+    title    = "CD8+ subset compositional shift: pre-pCR -> pre-RD",
+    subtitle = paste0("Dots = pooled proportion (red pre-pCR, blue pre-RD); arrow = direction of shift\n",
+                      "Stars = per-patient Wilcoxon, BH-corrected (* <.05  ** <.01  *** <.001)"),
+    x = "Proportion of CD8+ compartment", y = NULL) +
+  theme_bw() +
+  theme(plot.title    = element_text(face = "bold", size = 13),
+        plot.subtitle = element_text(size = 8.5, face = "italic", lineheight = 1.1),
+        axis.text.y   = element_text(size = 9),
+        panel.grid.minor = element_blank(),
+        legend.position = "bottom")
+
+ggsave("output/CD8T_compositional_shift.pdf", plot = p_shift, width = 8.5, height = 6)
+
+
+### CD8+ marker expression by cluster: boxplot -> output/CD8T_gene_expression_boxplot.pdf ###
+# Exploratory, cell-level. One panel per gene, clusters on x, split by response.
+# Cell-level so the boxes show real spread -- NOT the figure to quote p-values from.
 p_boxcluster <- ggplot(expr_long, aes(x = cluster, y = expression, fill = new_group)) +
   geom_boxplot(outlier.size = 0.3, alpha = 0.8) +
-  scale_fill_manual(values = c("pre-pCR" = "#CC0C00FF", "pre-RD" = "#5C88DAFF")) +
+  scale_fill_manual(values = group_colors) +
   facet_wrap(~ gene, scales = "free_y", ncol = 2) +
   labs(title = "CD8+ T cell gene expression by cluster and response",
        x = "Cluster", y = "Normalized expression", fill = "Response") +
   theme_classic() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6),
-        strip.text = element_text(face = "bold"),
-        plot.title = element_text(hjust = 0.5)) +
-  scale_x_discrete(labels = function(x) gsub("_", "\n", x))
+        strip.text  = element_text(face = "bold"),
+        plot.title  = element_text(hjust = 0.5)) +
+  scale_x_discrete(labels = function(x) gsub("_", "\n", x))   # wrap long cluster names at underscores
 
-# --- Dot plot ---
+ggsave("output/CD8T_gene_expression_boxplot.pdf", plot = p_boxcluster, width = 14, height = 10)
+
+
+### CD8+ marker expression: dot plot -> output/CD8T_marker_dotplot.pdf ###
+# Standard Seurat-style dot plot: size = % of cells expressing, color = z-scored mean.
+# Pooled across response groups (the by-response version is the ComplexHeatmap below).
 p_dot <- ggplot(dotplot_df, aes(x = gene, y = cluster)) +
   geom_point(aes(size = pct_express, color = z_score)) +
   scale_color_gradient2(low = "#5C88DAFF", mid = "white", high = "#CC0C00FF",
@@ -1145,11 +1259,16 @@ p_dot <- ggplot(dotplot_df, aes(x = gene, y = cluster)) +
   theme_bw() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10, face = "italic"),
         axis.text.y = element_text(size = 10),
-        plot.title = element_text(hjust = 0.5, face = "bold", size = 13),
+        plot.title  = element_text(hjust = 0.5, face = "bold", size = 13),
         panel.grid.major = element_line(color = "#EFEFEF", linewidth = 0.2),
         panel.grid.minor = element_blank())
 
-# --- Patient-level beeswarm ---
+ggsave("output/CD8T_marker_dotplot.pdf", plot = p_dot, width = 10, height = 6)
+
+
+### CD8+ marker expression, patient-level (Fig 6A style): beeswarm -> output/CD8T_pretreatment_expression_6Astyle.pdf ###
+# The pseudoreplication-safe view of marker expression: one point per patient, labeled,
+# so a reviewer can see exactly how many independent observations there are (9 pCR, 16 RD).
 p_beeswarm <- ggplot(expr_long_patient, aes(x = new_group, y = expression)) +
   geom_boxplot(aes(color = new_group), fill = NA, outlier.shape = NA,
                width = 0.45, linewidth = 0.7) +
@@ -1165,162 +1284,333 @@ p_beeswarm <- ggplot(expr_long_patient, aes(x = new_group, y = expression)) +
         plot.title = element_text(hjust = 0.5, size = 11),
         legend.position = "none")
 
-# --- Save all explicitly ---
-ggsave("output/CD8T_subset_piechart.pdf",          plot = p_pie,        width = 12, height = 6)
-ggsave("output/CD8T_subset_barplot.pdf",           plot = p_bar_comp,   width = 8,  height = 6)
-ggsave("output/CD8T_gene_expression_boxplot.pdf",  plot = p_boxcluster, width = 14, height = 10)
-ggsave("output/CD8T_marker_dotplot.pdf",           plot = p_dot,        width = 10, height = 6)
 ggsave("output/CD8T_pretreatment_expression_6Astyle.pdf", plot = p_beeswarm, width = 8, height = 10)
-ggsave("output/Macrophage_M1_M2_UMAP.pdf",        plot = p1 | p2 | p3 | p4, width = 22, height = 6)
 
-genes <- c("IFNG", "TNF", "GZMK", "GZMB", "GZMH", "MKI67")
 
-expr_df <- FetchData(scRNA.origin, 
-                     vars = c("Celltype_Minor", "Celltype_Subset", 
-                              "new_group", genes)) %>%
-  filter(Celltype_Minor == "CD8+T cell",
-         new_group %in% c("pre-pCR", "pre-RD"))
+### CD8+ marker dot-heatmap by response -> output/CD8T_dotheatmap_by_response.pdf ###
+# Publication version of the dot plot: two panels (pCR | RD) sharing rows, so the same
+# cluster can be compared across responses by eye. Built with ComplexHeatmap rather than
+# ggplot so the rows can be split by lineage and annotated with cluster size.
 
-head(expr_df)
-
-library(tidyr)
-
-# Compute per-group dot plot data
+# Per-group summary: mean expr, % expressed, within-group z-score
 dotplot_grouped <- expr_long %>%
   group_by(gene, cluster, new_group) %>%
   summarise(
     mean_expr   = mean(expression, na.rm = TRUE),
     pct_express = mean(expression > 0, na.rm = TRUE),
+    n_cells     = dplyr::n(),
     .groups = "drop"
   ) %>%
+  # z-score scaled WITHIN each response group. Colors therefore mean "high for a cluster
+  # in this group", i.e. compare down a panel, not across the two panels.
   group_by(gene, new_group) %>%
-  mutate(z_score = scale(mean_expr)[,1]) %>%
+  mutate(z_score = scale(mean_expr)[, 1]) %>%
   ungroup() %>%
   mutate(new_group = factor(new_group, levels = c("pre-pCR", "pre-RD")))
 
-ggplot(dotplot_grouped, aes(x = gene, y = cluster)) +
-  geom_point(aes(size = pct_express, color = z_score)) +
-  scale_color_gradient2(
-    low      = "#5C88DAFF",
-    mid      = "white",
-    high     = "#CC0C00FF",
-    midpoint = 0,
-    name     = "Z-score\n(mean expr)"
-  ) +
-  scale_size_continuous(
-    range  = c(0.5, 7),
-    labels = scales::percent_format(),
-    name   = "% Expressed"
-  ) +
-  facet_wrap(~ new_group, ncol = 2) +
-  labs(
-    title = "CD8+ T cell marker gene expression by subtype and response",
-    x     = "Marker Gene",
-    y     = "CD8+ Subtype"
-  ) +
-  theme_bw() +
-  theme(
-    axis.text.x      = element_text(angle = 45, hjust = 1, size = 10, face = "italic"),
-    axis.text.y      = element_text(size = 9),
-    axis.title       = element_text(size = 11),
-    plot.title       = element_text(hjust = 0.5, face = "bold", size = 12),
-    strip.text       = element_text(face = "bold", size = 11),
-    strip.background = element_rect(fill = "grey95", color = "grey70"),
-    panel.grid.major = element_line(color = "grey90", linewidth = 0.3),
-    panel.grid.minor = element_blank(),
-    legend.title     = element_text(size = 9)
+# One n_cells per cluster for the left barplot (max across group/gene; the two groups
+# have different totals, and we want a single representative size per row)
+cluster_sizes <- dotplot_grouped %>%
+  group_by(cluster) %>%
+  summarise(n_cells = max(n_cells), .groups = "drop")
+
+# Gene order curated so categories are contiguous (cytotoxic -> cytokine -> proliferation),
+# not first-appearance order
+gene_levels   <- c("GZMB", "GZMH", "GZMK", "IFNG", "TNF", "MKI67")
+gene_category <- c(GZMB = "Cytotoxic", GZMH = "Cytotoxic", GZMK = "Cytotoxic",
+                   IFNG = "Cytokine",  TNF  = "Cytokine",  MKI67 = "Proliferation")
+
+# Cluster rows sorted numerically by cXX, then split into lineage blocks.
+# "^.*c([0-9]+)_" tolerates the CD8T_ prefix; an earlier "^c([0-9]+)_" version returned
+# NAs and silently scrambled the row order.
+raw_clusters_h <- unique(as.character(dotplot_grouped$cluster))
+cluster_levels <- raw_clusters_h[order(as.integer(sub("^.*c([0-9]+)_.*", "\\1", raw_clusters_h)))]
+lineage_vec    <- sub("^.*c[0-9]+_([A-Za-z0-9]+)_.*$", "\\1", cluster_levels)
+lineage_order  <- c("Tnaive", "Tem", "Tpex", "Tnk", "Tcyc")
+row_split      <- factor(lineage_vec, levels = lineage_order)
+
+groups <- c("pre-pCR", "pre-RD")
+
+# Aligned z-score + % matrices, one pair per response group.
+# Both are re-indexed to [cluster_levels, gene_levels] so the two panels and the
+# cell_fun lookups all address the same cell in the same order.
+make_mats <- function(g) {
+  d <- filter(dotplot_grouped, new_group == g)
+  to_mat <- function(val) d %>%
+    select(cluster, gene, dplyr::all_of(val)) %>%
+    pivot_wider(names_from = gene, values_from = dplyr::all_of(val)) %>%
+    column_to_rownames("cluster") %>% as.matrix()
+  list(z = to_mat("z_score")[cluster_levels, gene_levels, drop = FALSE],
+       p = to_mat("pct_express")[cluster_levels, gene_levels, drop = FALSE])
+}
+mats <- setNames(lapply(groups, make_mats), groups)
+
+# Colors + dot geometry
+col_fun <- colorRamp2(c(-2, 0, 2), c("#5C88DAFF", "white", "#CC0C00FF"))
+cell_mm <- 7; max_r <- 2.45          # max_r ~= 0.35*cell_mm so dots never touch at 100%
+
+category_cols <- c(Cytotoxic = "#41725B", Cytokine = "#B5651D", Proliferation = "#6B4C9A")
+lineage_cols  <- c(Tnaive = "#C6C6C6", Tem = "#8FBC8F", Tpex = "#E8998D",
+                   Tnk = "#9FB1D4", Tcyc = "#D9C47E")
+
+# One dot per cell: outline rectangle + circle sized by % expressed.
+# rect_gp = gpar(type = "none") in the Heatmap() call suppresses the default fill so this
+# function draws everything. i/j are ORIGINAL matrix indices even under row_split.
+make_cellfun <- function(pmat) function(j, i, x, y, width, height, fill) {
+  grid.rect(x, y, width, height, gp = gpar(col = "grey92", fill = NA, lwd = 0.4))
+  pe <- pmat[i, j]
+  if (!is.na(pe) && pe > 0)
+    grid.circle(x, y, r = unit(pe * max_r, "mm"),
+                gp = gpar(fill = fill, col = "grey35", lwd = 0.3))
+}
+
+# Top annotation: "Mean % expressing" barplot + gene-category strip.
+# Each bar = mean fraction of cells expressing that gene, averaged across clusters within
+# the group. axis/name shown on the left panel only, so the two panels don't duplicate them.
+make_top <- function(pmat, first = FALSE) HeatmapAnnotation(
+  `Mean % expressing` = anno_barplot(colMeans(pmat, na.rm = TRUE),
+                                     gp = gpar(fill = "grey55", col = NA),
+                                     height = unit(1, "cm"),
+                                     axis = first,
+                                     axis_param = list(gp = gpar(fontsize = 6))),
+  Category = gene_category[gene_levels],
+  col = list(Category = category_cols),
+  simple_anno_size     = unit(3.5, "mm"),
+  show_annotation_name = if (first) c(TRUE, FALSE) else FALSE,  # label barplot on left panel only
+  annotation_name_side = "left",
+  annotation_name_gp   = gpar(fontsize = 7),
+  gap = unit(1, "mm")
+)
+
+# Left annotation (first panel only): lineage color strip + N-cells barplot.
+# The N-cells bars are the reader's caveat -- a tiny cluster's z-score is noisy.
+n_cells_vec <- cluster_sizes$n_cells[match(cluster_levels, cluster_sizes$cluster)]
+left_anno <- rowAnnotation(
+  Lineage = lineage_vec,
+  `N cells` = anno_barplot(n_cells_vec, gp = gpar(fill = "grey45", col = NA),
+                           width = unit(1.6, "cm"),
+                           axis_param = list(gp = gpar(fontsize = 6))),
+  col = list(Lineage = lineage_cols),
+  simple_anno_size    = unit(3.5, "mm"),
+  annotation_name_gp  = gpar(fontsize = 7),
+  annotation_name_rot = 90,
+  gap = unit(1, "mm")
+)
+
+# Heatmap builder, called once per response group.
+# `first` controls everything that should appear only once across the two panels:
+# row names, left annotation, the color legend, and the barplot axis.
+mk_ht <- function(g, first = FALSE) {
+  z <- mats[[g]]$z
+  Heatmap(
+    z, col = col_fun,
+    rect_gp  = gpar(type = "none"),          # cell_fun draws the cells instead
+    cell_fun = make_cellfun(mats[[g]]$p),
+    cluster_rows = FALSE, cluster_columns = FALSE,   # order is curated, not clustered
+    row_split = row_split, row_gap = unit(2, "mm"),
+    row_title_gp = gpar(fontsize = 9, fontface = "bold"), row_title_rot = 0,
+    top_annotation  = make_top(mats[[g]]$p, first = first),
+    left_annotation = if (first) left_anno else NULL,
+    width  = unit(ncol(z) * cell_mm, "mm"),  # fixed cell size -> predictable square cells
+    height = unit(nrow(z) * cell_mm, "mm"),
+    column_title    = g,
+    column_title_gp = gpar(fontface = "bold", fontsize = 11),
+    column_names_gp = gpar(fontsize = 9, fontface = "italic"),
+    row_names_side  = "left", row_names_gp = gpar(fontsize = 9),
+    show_row_names  = first,
+    # distinct internal name per panel or ComplexHeatmap merges the two legends
+    name = if (first) "Z-score\n(mean expr)" else paste0("z_", g),
+    show_heatmap_legend = first,
+    border = TRUE
   )
+}
+ht_pcr <- mk_ht("pre-pCR", first = TRUE)
+ht_rd  <- mk_ht("pre-RD",  first = FALSE)
 
-ggsave("output/CD8T_dotplot_by_response.pdf", width = 12, height = 7)
+# Manual "% Expressed" size legend. ComplexHeatmap can't auto-generate this because the
+# dot sizes come from cell_fun, so the geometry is reproduced by hand: diameter = 2 * radius.
+pct_breaks <- c(0.25, 0.5, 0.75, 1.0)
+lgd_size <- Legend(
+  title = "% Expressed", labels = paste0(pct_breaks * 100, "%"),
+  type = "points", pch = 21, size = unit(pct_breaks * max_r * 2, "mm"),
+  legend_gp = gpar(fill = "grey55", col = "grey35"), background = "white",
+  title_gp = gpar(fontsize = 9, fontface = "bold"), labels_gp = gpar(fontsize = 8)
+)
 
-### UMAP ###
-table(scRNA.origin@meta.data$Celltype_Minor)
-mac <- subset(scRNA.origin, Celltype_Minor == "Macrophage")
+# Draw + save, with a caption spelling out what the top barplot means
+pdf("output/CD8T_dotheatmap_by_response.pdf", width = 13, height = 7)
+draw(ht_pcr + ht_rd,
+     ht_gap = unit(6, "mm"),
+     column_title = "CD8+ T cell marker expression by subtype and response",
+     column_title_gp = gpar(fontface = "bold", fontsize = 13),
+     annotation_legend_list = list(lgd_size),
+     merge_legend = TRUE,
+     heatmap_legend_side = "right", annotation_legend_side = "right")
+grid.text(
+  paste('Top bars ("Mean % expressing") = mean fraction of cells expressing each gene,',
+        "averaged across clusters within each response group."),
+  x = unit(0.5, "npc"), y = unit(0.02, "npc"),
+  gp = gpar(fontsize = 8, fontface = "italic")
+)
+dev.off()
+
+
+### MP -> pCR: Firth model, per-MP Wilcoxon (BH), MP_22 boxplot -> output/MP22_by_response.pdf ###
+# scRNA.cancer holds the epithelial/cancer cells with the NMF metaprogram scores (MP_11..MP_44).
+# Everything here is PATIENT-level: MP scores are averaged within a patient first, so both the
+# regression and the Wilcoxon have n = 24 patients (15 RD, 9 pCR), not n = cells.
+
+# Clinical covariates (summary form only -- the sheet is a formatted table, not tidy data,
+# so it's loaded for reference rather than joined)
+clinical <- read_excel("~/Documents/Ting Data/Table S1_baseline clinical characteristics.xlsx")
+
+# Pre-treatment cells -> one mean MP score per patient -> binary outcome
+patient_df <- scRNA.cancer@meta.data %>%
+  filter(new_group %in% c("pre-pCR", "pre-RD")) %>%
+  group_by(new_id_4, new_group) %>%
+  summarise(
+    MP_11 = mean(MP_11, na.rm = TRUE),
+    MP_22 = mean(MP_22, na.rm = TRUE),
+    MP_33 = mean(MP_33, na.rm = TRUE),
+    MP_44 = mean(MP_44, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(pCR = ifelse(new_group == "pre-pCR", 1, 0))
+
+table(patient_df$pCR)   # 15 RD / 9 pCR
+
+# Firth-penalized logistic regression rather than plain glm(): with 24 patients, 4 predictors
+# and an imbalanced outcome, standard ML can separate and blow the coefficients up to infinity.
+# Firth's penalty keeps the estimates finite and the profile-likelihood CIs usable.
+model_firth <- logistf(pCR ~ MP_11 + MP_22 + MP_33 + MP_44, data = patient_df)
+summary(model_firth)
+
+# Univariate check on the same patient-level values, BH-corrected across the 4 MPs.
+# MP_22 (cell cycle) is the one that survives (p_adj ~ 0.02).
+mp_cols <- c("MP_11", "MP_22", "MP_33", "MP_44")
+pvals <- sapply(mp_cols, function(mp) wilcox.test(patient_df[[mp]] ~ patient_df$pCR)$p.value)
+mp_results <- data.frame(MP = mp_cols, p_raw = pvals,
+                         p_adj = p.adjust(pvals, method = "BH"))
+write.csv(mp_results, "output/MP_wilcox_FDR.csv", row.names = FALSE)
+
+# MP_22 by response. One point per patient; n printed in the subtitle so the reader
+# can see the sample size without hunting for it.
+p_mp22 <- ggplot(patient_df, aes(x = factor(pCR, labels = c("RD", "pCR")),
+                                 y = MP_22,
+                                 fill = factor(pCR, labels = c("RD", "pCR")))) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6) +      # outliers hidden: jitter already shows every point
+  geom_jitter(width = 0.1, size = 3, alpha = 0.8) +
+  scale_fill_manual(values = c("RD" = "#5C88DAFF", "pCR" = "#CC0C00FF")) +
+  labs(title = "MP_22 score by treatment response",
+       subtitle = paste0("RD n=", sum(patient_df$pCR == 0),
+                         ", pCR n=", sum(patient_df$pCR == 1)),
+       x = "Response", y = "MP_22 score (patient mean)", fill = "Response") +
+  theme_classic() +
+  theme(legend.position = "none")
+
+ggsave("output/MP22_by_response.pdf", plot = p_mp22, width = 4, height = 5)
+
+
+########################################
+#
+# MYELOID / MACROPHAGE SECTIONS
+#
+# Separate Seurat object (M_DC_seurat.rds) with its own metadata schema:
+#   - cluster column is Celltype_subset (lowercase "s"), NOT Celltype_Subset
+#   - sample ID is new_id_4, response is new_group (four levels)
+#   - cluster names carry an "M_" prefix (M_c4_Macro_CCL4, not c4_Macro_CCL4)
+#
+# NOTE ON `mac`: it is assigned the FULL object below -- all 15 myeloid/DC clusters,
+# including monocytes, cDC/pDC/mregDC, mast and neutrophils. Despite the variable name it
+# is not a macrophage subset. The four-panel figure and the per-cluster grid therefore
+# cover the whole myeloid compartment; only the by-sample sections at the end filter down
+# to macrophages proper. If those two figures should be macrophage-only, subset `mac` to
+# `macro_levels` (defined below) before building them.
+#
+########################################
+
+
+### Macrophage M1/M2 four-panel figure -> output/Macrophage_M1_M2_UMAP.pdf ###
+# Panels: M1 signature UMAP | M2 signature UMAP | annotated clusters | c4-vs-c11 boxplot.
+# The boxplot is scoped to c4 and c11 because those are the two clusters the reviewer named.
+scRNA_M <- readRDS("M_DC_seurat.rds")
+mac <- scRNA_M        # full myeloid/DC object -- see note above
+
+# M1-like / M2-like module scores. AddModuleScore appends a "1" to the name argument,
+# so these land in the metadata as M1_score1 / M2_score1 (not M1_score).
 m1_genes <- c("TNF", "IL6", "IL1B", "CXCL10", "CXCL9", "CD86", "NOS2", "STAT1")
 m2_genes <- c("MRC1", "CD163", "ARG1", "IL10", "TGFB1", "CCL18", "VEGFA", "PDCD1LG2")
-
-# Filter to genes present in the object
-m1_genes <- m1_genes[m1_genes %in% rownames(mac)]
+m1_genes <- m1_genes[m1_genes %in% rownames(mac)]   # AddModuleScore errors on absent genes
 m2_genes <- m2_genes[m2_genes %in% rownames(mac)]
-
-# Add module scores
 mac <- AddModuleScore(mac, features = list(m1_genes), name = "M1_score")
 mac <- AddModuleScore(mac, features = list(m2_genes), name = "M2_score")
 
-m1_p <- wilcox.test(M1_score1 ~ Celltype_Subset, 
-                    data = mac@meta.data %>% dplyr::filter(grepl("c4|c11", Celltype_Subset)))$p.value
-m2_p <- wilcox.test(M2_score1 ~ Celltype_Subset, 
-                    data = mac@meta.data %>% dplyr::filter(grepl("c4|c11", Celltype_Subset)))$p.value
+# c4-vs-c11 module scores (feeds the boxplot).
+# droplevels() is essential: subsetting a factor keeps all 15 levels, and wilcox.test
+# then errors with "grouping factor must have exactly 2 levels".
+score_df <- mac@meta.data %>%
+  filter(Celltype_subset %in% c("M_c4_Macro_CCL4", "M_c11_Cycling_MKI67")) %>%
+  select(Celltype_subset, M1_score1, M2_score1) %>%
+  pivot_longer(c(M1_score1, M2_score1), names_to = "signature", values_to = "score") %>%
+  mutate(signature = recode(signature, "M1_score1" = "M1-like", "M2_score1" = "M2-like"),
+         cluster   = droplevels(Celltype_subset))
 
-padj <- p.adjust(c(m1_p, m2_p), method = "BH")
-names(padj) <- c("M1-like", "M2-like")
+# Wilcoxon per signature (c4 vs c11), BH-corrected across the two tests.
+# Cell-level: this compares two clusters within the same tissue, so it is not the
+# pseudoreplication question the by-sample figures address.
+m1_p <- wilcox.test(M1_score1 ~ Celltype_subset,
+                    data = filter(mac@meta.data, Celltype_subset %in% c("M_c4_Macro_CCL4", "M_c11_Cycling_MKI67")))$p.value
+m2_p <- wilcox.test(M2_score1 ~ Celltype_subset,
+                    data = filter(mac@meta.data, Celltype_subset %in% c("M_c4_Macro_CCL4", "M_c11_Cycling_MKI67")))$p.value
+padj_c4c11 <- p.adjust(c(m1_p, m2_p), method = "BH")   # renamed: `padj` collides with other sections
+fdr_labels <- data.frame(signature = c("M1-like", "M2-like"),
+                         label = paste0("FDR = ", signif(padj_c4c11, 2)))
 
-fdr_labels <- data.frame(
-  signature = c("M1-like", "M2-like"),
-  label = paste0("FDR = ", signif(padj, 2))
-)
-
-# Merge into score_df for annotating
-score_df <- score_df %>%
-  left_join(fdr_labels, by = "signature")
-
-unique(score_df$cluster)
-
-
-# take the macrophages out 
-# Plot
-p1 <- FeaturePlot(mac, features = "M1_score1", order = TRUE, pt.size = 0.5) +
-  scale_color_gradientn(colors = c("lightgrey", "#CC0C00FF")) +
-  labs(title = "M1-like signature") +
-  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
-
-p2 <- FeaturePlot(mac, features = "M2_score1", order = TRUE, pt.size = 0.5) +
-  scale_color_gradientn(colors = c("lightgrey", "#5C88DAFF")) +
-  labs(title = "M2-like signature") +
-  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
-
-# Add annotation to UMAP plots
-p1 <- FeaturePlot(mac, features = "M1_score1", order = TRUE, pt.size = 0.5) +
-  scale_color_gradientn(colors = c("lightgrey", "#CC0C00FF")) +
-  labs(title = "M1-like signature",
-       caption = format_p(p_m1)) +
-  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
-        plot.caption = element_text(hjust = 0.5, size = 10, face = "italic"))
-
-p2 <- FeaturePlot(mac, features = "M2_score1", order = TRUE, pt.size = 0.5) +
-  scale_color_gradientn(colors = c("lightgrey", "#5C88DAFF")) +
-  labs(title = "M2-like signature",
-       caption = format_p(p_m2)) +
-  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
-        plot.caption = element_text(hjust = 0.5, size = 10, face = "italic"))
-
-p1 <- p1 + labs(caption = paste0("FDR = ", signif(padj["M1-like"], 2)))
-p2 <- p2 + labs(caption = paste0("FDR = ", signif(padj["M2-like"], 2)))
-
-p3 <- DimPlot(mac, group.by = "Celltype_Subset",
-              label = TRUE, label.size = 3, repel = TRUE, pt.size = 0.5) +
-  labs(title = "Macrophage clusters") +
-  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
-
+# y position for each FDR label, just above the tallest box in that signature's group
 y_pos <- score_df %>%
   group_by(signature) %>%
   summarise(y = max(score, na.rm = TRUE) * 1.08, .groups = "drop") %>%
   left_join(fdr_labels, by = "signature")
 
+# M1 signature on the UMAP. order = TRUE draws high-scoring cells last so they aren't
+# buried under grey low-scoring ones.
+p1 <- FeaturePlot(mac, features = "M1_score1", order = TRUE, pt.size = 0.5) +
+  scale_color_gradientn(colors = c("lightgrey", "#CC0C00FF")) +
+  labs(title = "M1-like signature") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
 
+# M2 signature on the UMAP
+p2 <- FeaturePlot(mac, features = "M2_score1", order = TRUE, pt.size = 0.5) +
+  scale_color_gradientn(colors = c("lightgrey", "#5C88DAFF")) +
+  labs(title = "M2-like signature") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# Reproduce Seurat's default UMAP palette so the boxplot fills can match the UMAP exactly
+clust_levels <- levels(factor(mac$Celltype_subset))
+mac_cols <- setNames(hue_pal()(length(clust_levels)), clust_levels)
+
+# Annotated clusters (the color source for the boxplot)
+p3 <- DimPlot(mac, group.by = "Celltype_subset", cols = mac_cols,
+              label = TRUE, label.size = 3, repel = TRUE, pt.size = 0.5) +
+  labs(title = "Macrophage clusters") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# Read the exact color the UMAP actually drew for each cluster, rather than assuming
+# hue_pal() and DimPlot agree on ordering. ggplot_build()$data[[1]]$group is indexed by
+# factor level, so match() maps level position -> drawn color.
+umap_layer   <- ggplot_build(p3)$data[[1]]
+idx          <- match(seq_along(clust_levels), umap_layer$group)
+umap_palette <- setNames(umap_layer$colour[idx], clust_levels)
+
+# c4 vs c11 module scores, filled with the same cluster colors as the UMAP.
+# x = signature, fill = cluster: the two clusters sit side by side within each signature.
 p4 <- ggplot(score_df, aes(x = signature, y = score, fill = cluster)) +
-  geom_boxplot(outlier.size = 0.3, alpha = 0.8, width = 0.6,
+  geom_boxplot(outlier.size = 0.3, alpha = 1, width = 0.6,
                position = position_dodge(0.75)) +
-  geom_text(
-    data = y_pos,
-    aes(x = signature, y = y, label = label),
-    inherit.aes = FALSE,
-    size = 3, fontface = "italic"
-  ) +
-  scale_fill_manual(values = c("c4_Macro_CCL4" = "#CC0C00FF", 
-                               "c11_Cycling_MKI67" = "#5C88DAFF"))
-  labs(title = "M1 vs M2 scores: c4 & c11",
-       x = NULL, y = "Module score", fill = "Cluster") +
+  geom_text(data = y_pos, aes(x = signature, y = y, label = label),
+            inherit.aes = FALSE, size = 3, fontface = "italic") +
+  scale_fill_manual(values = umap_palette[c("M_c4_Macro_CCL4", "M_c11_Cycling_MKI67")]) +
+  labs(title = "M1 vs M2 scores: c4 vs c11", x = NULL, y = "Module score", fill = "Cluster") +
   theme_classic() +
   theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11),
         axis.text.x = element_text(angle = 30, hjust = 1, size = 8),
@@ -1330,20 +1620,398 @@ pdf("output/Macrophage_M1_M2_UMAP.pdf", width = 22, height = 6)
 p1 | p2 | p3 | p4
 dev.off()
 
-## fdr for p values
-data.frame(MP = mp_cols, p_raw = pvals, p_adj = p.adjust(pvals, method = "BH"))
-mp_results <- data.frame(
-  MP    = mp_cols,
-  p_raw = pvals,
-  p_adj = p.adjust(pvals, method = "BH")
-) %>%
-  mutate(significant = p_adj < 0.05)
 
-write.csv(mp_results, "output/MP_wilcox_FDR.csv", row.names = FALSE)
+### Per-cluster M1 vs M2 module-score boxplots -> output/Macrophage_M1_M2_c2.pdf, output/Macrophage_M1_M2_per_cluster.pdf ###
+# Follow-up to the c4-vs-c11 boxplot, which compared the two clusters the reviewer named.
+# Here the comparison is *within* each cluster instead: for a given cluster, are its cells
+# more M1-like or more M2-like? Each cluster gets its own panel with the same layout as the
+# c4/c11 boxplot -- M1-like and M2-like on the x-axis, boxes filled with that cluster's color
+# taken straight from the UMAP (p3), so a panel can be matched back to the UMAP by eye.
+# Clusters are never tested against each other here.
+#
+# Stats: paired Wilcoxon per cluster (M1_score1 vs M2_score1 in the SAME cells), BH-corrected
+# across clusters. Reads as relative polarization within a cluster, not absolute expression --
+# the two module scores come from different gene sets, so their magnitudes aren't interchangeable.
+#
+# Outputs: c2 alone (standalone panel) and all clusters (one panel each, patchwork grid).
+# Requires M1_score1 / M2_score1 from the AddModuleScore step above, and p3 from the 4-panel figure.
 
-# save plots
-ggsave("output/Macrophage_M1_M2_UMAP.pdf", width = 18, height = 6)
-ggsave("output/CD8T_pretreatment_expression_6Astyle.pdf", width = 8, height = 10)
-ggsave("output/CD8T_subset_piechart.pdf", width = 12, height = 6)
-ggsave("output/CD8T_gene_expression_boxplot.pdf", width = 14, height = 10)
-ggsave("output/CD8T_marker_dotplot.pdf", width = 10, height = 6)
+cl_levels <- levels(factor(mac$Celltype_subset))
+
+# Same trick as the c4/c11 boxplot: read the exact colors the UMAP drew, so the fills match.
+# Falls back to hue_pal() if p3 isn't in the environment (e.g. running this section alone).
+if (exists("p3")) {
+  umap_layer   <- ggplot_build(p3)$data[[1]]
+  idx          <- match(seq_along(cl_levels), umap_layer$group)
+  umap_palette <- setNames(umap_layer$colour[idx], cl_levels)
+} else {
+  umap_palette <- setNames(hue_pal()(length(cl_levels)), cl_levels)
+}
+
+# Paired Wilcoxon (M1 vs M2 in the same cells), one per cluster, BH across clusters.
+# Guard on n < 3: a cluster too small to test returns NA rather than erroring out the sapply.
+cl_p <- sapply(cl_levels, function(cl) {
+  d <- dplyr::filter(mac@meta.data, Celltype_subset == cl)
+  if (nrow(d) < 3) return(NA_real_)
+  wilcox.test(d$M1_score1, d$M2_score1, paired = TRUE)$p.value
+})
+cl_padj <- setNames(p.adjust(cl_p, method = "BH"), cl_levels)
+
+# One M1-vs-M2 boxplot for one cluster, filled with that cluster's UMAP color.
+# Both boxes share the cluster's color (identity), and M1 vs M2 is read off the x-axis --
+# same encoding as the c4/c11 panel.
+plot_cluster <- function(cl) {
+  df <- mac@meta.data %>%
+    dplyr::filter(Celltype_subset == cl) %>%
+    dplyr::select(Celltype_subset, M1_score1, M2_score1) %>%
+    pivot_longer(c(M1_score1, M2_score1), names_to = "signature", values_to = "score") %>%
+    mutate(signature = recode(signature, M1_score1 = "M1-like", M2_score1 = "M2-like"),
+           cluster   = droplevels(factor(Celltype_subset, levels = cl_levels)))
+  
+  lab <- data.frame(x = 1.5,                                   # centered between the two boxes
+                    y = max(df$score, na.rm = TRUE) * 1.08,
+                    label = paste0("FDR = ", signif(cl_padj[[cl]], 2)))
+  
+  ggplot(df, aes(x = signature, y = score, fill = cluster)) +
+    geom_boxplot(outlier.size = 0.3, alpha = 1, width = 0.6) +
+    geom_text(data = lab, aes(x = x, y = y, label = label),
+              inherit.aes = FALSE, size = 3, fontface = "italic") +
+    scale_fill_manual(values = umap_palette[cl]) +
+    labs(title = cl, x = NULL, y = "Module score") +
+    theme_classic() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 10),
+          axis.text.x = element_text(angle = 30, hjust = 1, size = 8),
+          legend.position = "none")   # cluster identity is already in the panel title
+}
+
+# c2 alone
+c2_name <- grep("^M_c2_", cl_levels, value = TRUE)   # hardcode if grep is ever ambiguous
+p_c2 <- plot_cluster(c2_name)
+
+pdf("output/Macrophage_M1_M2_c2.pdf", width = 4, height = 5)
+print(p_c2); dev.off()
+
+# All clusters, one panel each.
+# Y-axes are free per panel, so spread is NOT comparable across panels -- add a shared
+# coord_cartesian(ylim = ...) inside plot_cluster if that matters (and pin the label y).
+plots    <- lapply(cl_levels, plot_cluster)
+n_col    <- 5
+combined <- wrap_plots(plots, ncol = n_col)
+
+pdf("output/Macrophage_M1_M2_per_cluster.pdf",
+    width  = 3.0 * n_col,
+    height = 3.6 * ceiling(length(plots) / n_col))
+print(combined); dev.off()
+
+
+########################################
+#
+# REVIEWER REQUEST: "Can you do the overall M1 vs M2 by sample among macrophage populations
+# only (not other myeloid populations), comparing pCR to RD samples, similar to what you did
+# for CD8 cell signatures?"
+#
+# Two figures answer this:
+#   1. Macrophage_M1_M2_by_sample.pdf         - THE deliverable. Same layout as the Fig 3C CD8
+#                                               signature boxplots: per-sample means, labeled
+#                                               points, Wilcoxon. This is what "overall ... by
+#                                               sample, comparing pCR to RD" asks for.
+#   2. Macrophage_M1_M2_dotheatmap_by_sample.pdf - supplementary, per-gene detail. Shows that
+#                                               samples vary; does not itself carry the test.
+#
+# Shared setup for both is defined once immediately below.
+#
+########################################
+
+
+### Shared: macrophage-only, pre-treatment-only cell set + sample-level scores ###
+
+sample_col      <- "new_id_4"     # sample / patient ID
+response_col    <- "new_group"    # FOUR levels; pre-treatment filtered explicitly below
+min_cells       <- 10             # min macrophages for a sample's mean to be trustworthy
+include_cycling <- TRUE           # c11_Cycling_MKI67 counted as macrophage (reviewer treated it
+# as one in the c4-vs-c11 ask). FALSE = strict _Macro_ labels only.
+min_pct         <- 0.01           # heatmap: drop genes expressed in <1% of macrophages (e.g. ARG1)
+
+# Macrophage clusters only: monocytes (c1, c9), cDC/pDC/mregDC (c3, c13, c14, c10),
+# mast (c5) and neutrophils (c0) are all excluded, per "not other myeloid populations".
+cl_levels    <- levels(factor(mac$Celltype_subset))
+macro_levels <- grep("_Macro_", cl_levels, value = TRUE)
+if (include_cycling) macro_levels <- c(macro_levels, grep("_Cycling_", cl_levels, value = TRUE))
+macro_levels <- cl_levels[cl_levels %in% macro_levels]   # keep the object's cluster ordering
+message("Macrophage clusters used: ", paste(macro_levels, collapse = ", "))
+
+# Macrophage cells, pre-treatment only, with sample + response under stable names.
+# The pre-treatment filter must be explicit: new_group carries post-pCR / post-RD, and
+# relying on factor(levels = c("pre-pCR","pre-RD")) would convert those cells to NA
+# rather than removing them.
+macro_meta <- mac@meta.data %>%
+  rownames_to_column("cell") %>%
+  dplyr::filter(Celltype_subset %in% macro_levels,
+                .data[[response_col]] %in% c("pre-pCR", "pre-RD")) %>%
+  dplyr::mutate(sample   = as.character(.data[[sample_col]]),
+                response = factor(as.character(.data[[response_col]]),
+                                  levels = c("pre-pCR", "pre-RD")))
+
+# One M1 and one M2 value per sample = the pseudoreplication fix. Tests below have
+# n = samples, not n = cells, matching the CD8 patient-level reanalysis.
+sample_scores <- macro_meta %>%
+  dplyr::group_by(sample, response) %>%
+  dplyr::summarise(n_mac = dplyr::n(),
+                   M1    = mean(M1_score1, na.rm = TRUE),
+                   M2    = mean(M2_score1, na.rm = TRUE),
+                   .groups = "drop") %>%
+  dplyr::filter(n_mac >= min_cells) %>%
+  dplyr::mutate(polarization = M1 - M2)   # >0 = M1-skewed sample
+
+# Sample accounting, for the response letter:
+#   - 25 pre-treatment samples exist
+#   - P02R and P06R contain ZERO macrophages (2 and 5 myeloid cells respectively)
+#   - P17R contains 2 macrophages -> dropped by min_cells = 10
+#   - leaves 7 pCR vs 15 RD. The macrophage counts jump 2 -> 12 -> 16 -> 20, so a threshold
+#     anywhere in 3..12 gives the same result; 10 is not a knife-edge choice.
+message("Samples retained: ",
+        sum(sample_scores$response == "pre-pCR"), " pCR, ",
+        sum(sample_scores$response == "pre-RD"),  " RD")
+write.csv(sample_scores, "output/Macrophage_M1_M2_sample_scores.csv", row.names = FALSE)
+
+# Restrict the cell table to the samples that survived the count filter
+macro_meta <- dplyr::filter(macro_meta, sample %in% sample_scores$sample)
+
+
+### PRIMARY: Macrophage M1/M2 by sample, pCR vs RD -> output/Macrophage_M1_M2_by_sample.pdf ###
+# Structurally identical to Fig3C_CD8T_boxplots.pdf: signature.matrix -> per-sample means ->
+# ggboxplot + labeled jitter + Wilcoxon, one panel per signature. Only the inputs differ
+# (M1/M2 module scores instead of the CD8 function signatures; macrophage cells only).
+
+mac.sub <- dplyr::rename(macro_meta, group = response)   # `group` matches the Fig 3C loop's naming
+
+signature.matrix <- mac.sub[, c("M1_score1", "M2_score1")]
+sig_titles       <- c(M1_score1 = "M1-like signature", M2_score1 = "M2-like signature")
+group  <- mac.sub$group
+sample <- mac.sub$sample
+
+plots <- list()
+raw_p <- numeric(ncol(signature.matrix))
+
+for (i in 1:ncol(signature.matrix)) {
+  
+  exp.matrix <- data.frame(expression = signature.matrix[, i],
+                           group = group, sample = sample)
+  
+  # One value per sample: mean module score across that sample's macrophages
+  sample.means <- exp.matrix %>%
+    group_by(sample, group) %>%
+    summarise(expression = mean(expression, na.rm = TRUE), .groups = "drop")
+  
+  # Captured separately so it can be BH-corrected across the two signatures below;
+  # stat_compare_means() on the panel prints the RAW p, as Fig 3C did.
+  raw_p[i] <- wilcox.test(expression ~ group, data = sample.means)$p.value
+  
+  # Axis labels carry the per-group n, so the reader sees the sample size on the figure
+  n_labels <- sample.means %>%
+    group_by(group) %>%
+    summarise(n = dplyr::n(), .groups = "drop") %>%
+    mutate(label = paste0(group, "\n(n=", n, ")"))
+  label_map <- setNames(n_labels$label, n_labels$group)
+  
+  # Push pCR labels left and RD labels right so ggrepel doesn't stack them over the boxes
+  sample.means <- sample.means %>%
+    mutate(nudge = ifelse(group == "pre-pCR", -0.6, 0.6))
+  
+  plots[[i]] <- ggboxplot(
+    sample.means, x = "group", y = "expression", fill = "group",
+    palette = "nejm", add = "jitter",
+    add.params = list(size = 1.5, alpha = 0.8)
+  ) +
+    # Label every point with its sample ID -- at n = 7 vs 15, individual samples are
+    # identifiable and a reviewer will want to trace outliers back to a patient
+    geom_text_repel(
+      data = sample.means,
+      aes(x = group, y = expression, label = sample),
+      size = 1.8, max.overlaps = Inf,
+      box.padding = 0.2, point.padding = 0.2,
+      segment.size = 0.25, segment.color = "grey60", segment.alpha = 0.6,
+      direction = "y", nudge_x = sample.means$nudge,
+      min.segment.length = 0, force = 2
+    ) +
+    scale_x_discrete(labels = label_map) +
+    ylab("Score") + xlab(NULL) +
+    ggtitle(sig_titles[colnames(signature.matrix)[i]]) +
+    theme_classic(base_size = 11) +
+    theme(plot.title  = element_text(hjust = 0.5, face = "bold", size = 11),
+          axis.text.x = element_text(size = 9, face = "bold"),
+          legend.position = "none",
+          plot.margin = margin(5, 40, 5, 40)) +   # extra L/R margin so nudged labels aren't clipped
+    stat_compare_means(label = "p.format", method = "wilcox.test",
+                       label.x.npc = 0.65, label.y.npc = 0.97, size = 3.5)
+}
+
+signature.score.plot <- wrap_plots(plots = plots, ncol = 2)
+ggsave("output/Macrophage_M1_M2_by_sample.pdf", signature.score.plot,
+       width = 7, height = 5)
+
+# BH across the two signatures. Quote THESE in the text -- the on-panel numbers are raw p,
+# and every other test in the manuscript is FDR-corrected.
+mac_stats <- data.frame(signature = c("M1-like", "M2-like"),
+                        p_raw = raw_p,
+                        p_adj = p.adjust(raw_p, method = "BH"))
+print(mac_stats)
+write.csv(mac_stats, "output/Macrophage_M1_M2_by_sample_stats.csv", row.names = FALSE)
+
+
+### SUPPLEMENTARY: Macrophage M1/M2 dot-heatmap by sample -> output/Macrophage_M1_M2_dotheatmap_by_sample.pdf ###
+# Per-gene companion to the boxplot above. Same figure grammar as CD8T_dotheatmap_by_response:
+# fill = z-scored mean expression, dot size = % of cells expressing, category strip on top,
+# N-count barplot on the left.
+#
+# Differences from the CD8 version:
+#   - rows are SAMPLES, not clusters
+#   - columns are the M1 / M2 signature genes, column-split by signature
+#   - pCR vs RD is a ROW split, not two side-by-side heatmaps (a sample is in one group only,
+#     so unlike the CD8 clusters the two blocks cannot share rows)
+#   - z-scores are computed ACROSS ALL SAMPLES, not within each response block. The CD8 figure
+#     z-scored within panel because the panels weren't the comparison; here they ARE, and
+#     within-block scaling would center both blocks on zero and mathematically erase the
+#     group difference the reviewer asked to see.
+
+# Drop genes essentially undetected in this compartment -- an all-empty column (ARG1) is
+# a distraction, not a null result worth plotting.
+genes_all <- c(m1_genes, m2_genes)
+pct_all   <- FetchData(mac, vars = genes_all)[macro_meta$cell, , drop = FALSE] %>%
+  summarise(across(everything(), ~ mean(.x > 0))) %>%
+  unlist()
+
+dropped <- names(pct_all)[pct_all < min_pct]
+if (length(dropped))
+  message("Dropped (expressed in <", min_pct * 100, "% of macrophages): ",
+          paste(dropped, collapse = ", "))
+
+genes_use     <- genes_all[!genes_all %in% dropped]
+gene_category <- setNames(ifelse(genes_use %in% m1_genes, "M1-like", "M2-like"), genes_use)
+
+# Sanity check: rows are sorted by polarization, so confirm that sort isn't just sorting on
+# sequencing depth. Per-sample means over few cells have high variance and land in the tails,
+# so a strong negative rho would mean the top of each block is noise, not biology.
+ct <- suppressWarnings(cor.test(sample_scores$n_mac, sample_scores$polarization,
+                                method = "spearman"))
+message("n_mac vs polarization: rho = ", signif(ct$estimate, 2),
+        ", p = ", signif(ct$p.value, 2))
+
+# Per-sample, per-gene summary
+dot_by_sample <- FetchData(mac, vars = genes_use) %>%
+  rownames_to_column("cell") %>%
+  # join on cell barcode rather than assuming FetchData and macro_meta share row order
+  dplyr::inner_join(dplyr::select(macro_meta, cell, sample, response), by = "cell") %>%
+  pivot_longer(dplyr::all_of(genes_use), names_to = "gene", values_to = "expression") %>%
+  dplyr::group_by(gene, sample, response) %>%
+  dplyr::summarise(mean_expr   = mean(expression, na.rm = TRUE),
+                   pct_express = mean(expression > 0, na.rm = TRUE),
+                   .groups = "drop") %>%
+  # z-scored across ALL samples per gene, so the pCR and RD blocks sit on one scale
+  dplyr::group_by(gene) %>%
+  dplyr::mutate(z_score = scale(mean_expr)[, 1]) %>%
+  dplyr::ungroup()
+
+# Rows: grouped by response, sorted within group by M1-M2 polarization (most M1-skewed on top)
+sample_levels <- sample_scores %>%
+  dplyr::arrange(response, dplyr::desc(polarization)) %>%
+  dplyr::pull(sample)
+row_split_s <- factor(sample_scores$response[match(sample_levels, sample_scores$sample)],
+                      levels = c("pre-pCR", "pre-RD"))   # _s suffix: `row_split` is taken by the CD8 heatmap
+
+# Aligned matrices, both indexed [sample_levels, genes_use] so cell_fun's i/j lookups line up
+to_mat <- function(val) dot_by_sample %>%
+  dplyr::select(sample, gene, dplyr::all_of(val)) %>%
+  pivot_wider(names_from = gene, values_from = dplyr::all_of(val)) %>%
+  column_to_rownames("sample") %>% as.matrix()
+zmat <- to_mat("z_score")[sample_levels, genes_use, drop = FALSE]
+pmat <- to_mat("pct_express")[sample_levels, genes_use, drop = FALSE]
+
+# Colors + dot geometry (same constants as the CD8 heatmap, so the two figures match visually)
+col_fun_s <- colorRamp2(c(-2, 0, 2), c("#5C88DAFF", "white", "#CC0C00FF"))
+cell_mm <- 7; max_r <- 2.45          # max_r ~= 0.35*cell_mm so dots never touch at 100%
+
+signature_cols <- c("M1-like" = "#CC0C00FF", "M2-like" = "#5C88DAFF")
+
+# One dot per cell: outline rectangle + circle sized by % expressed
+cell_fun_s <- function(j, i, x, y, width, height, fill) {
+  grid.rect(x, y, width, height, gp = gpar(col = "grey92", fill = NA, lwd = 0.4))
+  pe <- pmat[i, j]
+  if (!is.na(pe) && pe > 0)
+    grid.circle(x, y, r = unit(pe * max_r, "mm"),
+                gp = gpar(fill = fill, col = "grey35", lwd = 0.3))
+}
+
+# Top: mean % of cells expressing each gene (across samples) + M1/M2 signature strip
+top_anno_s <- HeatmapAnnotation(
+  `Mean % expressing` = anno_barplot(colMeans(pmat, na.rm = TRUE),
+                                     gp = gpar(fill = "grey55", col = NA),
+                                     height = unit(1, "cm"),
+                                     axis_param = list(gp = gpar(fontsize = 6))),
+  Signature = gene_category[genes_use],
+  col = list(Signature = signature_cols),
+  simple_anno_size     = unit(3.5, "mm"),
+  show_annotation_name = c(TRUE, FALSE),   # name the barplot, not the color strip (legend covers it)
+  annotation_name_side = "left",
+  annotation_name_gp   = gpar(fontsize = 7),
+  gap = unit(1, "mm")
+)
+
+# Left: how many macrophages each sample contributed -- the reader's caveat on small samples
+n_mac_vec <- sample_scores$n_mac[match(sample_levels, sample_scores$sample)]
+left_anno_s <- rowAnnotation(
+  `N macrophages` = anno_barplot(n_mac_vec, gp = gpar(fill = "grey45", col = NA),
+                                 width = unit(1.6, "cm"),
+                                 axis_param = list(gp = gpar(fontsize = 6))),
+  annotation_name_gp  = gpar(fontsize = 7),
+  annotation_name_rot = 90,
+  gap = unit(1, "mm")
+)
+
+ht_s <- Heatmap(
+  zmat, col = col_fun_s,
+  rect_gp  = gpar(type = "none"),          # cell_fun_s draws the cells
+  cell_fun = cell_fun_s,
+  cluster_rows = FALSE, cluster_columns = FALSE,   # both orders are curated
+  row_split = row_split_s, row_gap = unit(2, "mm"),
+  row_title_gp = gpar(fontsize = 9, fontface = "bold"), row_title_rot = 0,
+  column_split = factor(gene_category[genes_use], levels = c("M1-like", "M2-like")),
+  column_gap = unit(2, "mm"),
+  column_title_gp = gpar(fontface = "bold", fontsize = 10),
+  top_annotation  = top_anno_s,
+  left_annotation = left_anno_s,
+  width  = unit(ncol(zmat) * cell_mm, "mm"),
+  height = unit(nrow(zmat) * cell_mm, "mm"),
+  column_names_gp = gpar(fontsize = 9, fontface = "italic"),
+  row_names_side  = "left", row_names_gp = gpar(fontsize = 8),
+  name = "Z-score\n(mean expr)",
+  border = TRUE
+)
+
+# Manual size legend, geometry matched to cell_fun_s (diameter = 2 * radius)
+pct_breaks <- c(0.25, 0.5, 0.75, 1.0)
+lgd_size_s <- Legend(
+  title = "% Expressed", labels = paste0(pct_breaks * 100, "%"),
+  type = "points", pch = 21, size = unit(pct_breaks * max_r * 2, "mm"),
+  legend_gp = gpar(fill = "grey55", col = "grey35"), background = "white",
+  title_gp = gpar(fontsize = 9, fontface = "bold"), labels_gp = gpar(fontsize = 8)
+)
+
+# Height scales with sample count so the cells stay square as samples are added/dropped.
+# padding widens the left margin so the rotated "N macrophages" title isn't clipped.
+pdf("output/Macrophage_M1_M2_dotheatmap_by_sample.pdf",
+    width = 10.5, height = 3 + 0.30 * nrow(zmat))
+draw(ht_s,
+     column_title = "Macrophage M1/M2 marker expression by sample and response",
+     column_title_gp = gpar(fontface = "bold", fontsize = 13),
+     annotation_legend_list = list(lgd_size_s),
+     merge_legend = TRUE,
+     heatmap_legend_side = "right", annotation_legend_side = "right",
+     padding = unit(c(8, 12, 2, 2), "mm"))   # bottom, left, top, right
+grid.text(
+  paste("Rows = samples (macrophage clusters only), sorted by M1-M2 polarization within response.",
+        "\nZ-scores computed across all samples per gene, so pCR and RD blocks are directly comparable."),
+  x = unit(0.5, "npc"), y = unit(0.025, "npc"),
+  gp = gpar(fontsize = 8, fontface = "italic")
+)
+dev.off()
