@@ -1,3 +1,5 @@
+
+
 ################################################################################
 # Figure 3 + Supplementary Figure S6:
 #   Transcriptional profiling of TME cell subsets in relation to treatment response (Fig. 3) and annotation of all
@@ -136,7 +138,7 @@ write.csv(out,"output/hclust_bulk_celltype.csv")
 
 # draw dotplot
 sccomp.result<-read.csv("output/sccomp_ES_FDR_summary.csv")
-rownames(sccomp.result)<-sccomp.result$Celltype_subset
+rownames(sccomp.result)<-sccomp.result$Celltype_Subset
 sccomp.result[,"ES_postR.vs.preR"]<--sccomp.result[,"ES_preR.vs.postR"]
 sccomp.result[,"ES_postNR.vs.preNR"]<--sccomp.result[,"ES_preNR.vs.postNR"]
 
@@ -243,12 +245,12 @@ scRNA[["new_group"]] <- Idents(object = scRNA)
 head(scRNA@meta.data)
 
 scRNA@meta.data<-scRNA@meta.data[,c("new_id_4","nCount_RNA","nFeature_RNA","percent.mt","percent.HB","nCount_SCT","nFeature_SCT",
-                          "seq_batch","new_group","Celltype_subset","Celltype_subset_short","seurat_clusters")]
+                          "seq_batch","new_group","Celltype_Subset","Celltype_Subset_short","seurat_clusters")]
 saveRDS(scRNA,"data/CD8T_seurat.rds")
 
 ## Left: annotated UMAP
 pB_left <- DimPlot(scRNA,
-                   group.by = "Celltype_subset",
+                   group.by = "Celltype_Subset",
                    label    = FALSE,
                    pt.size  = 0.01,
                    raster   = FALSE) +
@@ -361,7 +363,7 @@ colnames(scRNA@meta.data)
 scRNA.sub<-subset(scRNA,new_group %in% c("pre-pCR","pre-RD"))
 signature.matrix<-scRNA.sub@meta.data[,c("Naive1","Cytokine.Cytokine.receptor6","Chemokine.Chemokine.receptor7")]#CD8T
 group<-scRNA.sub$new_group
-cell.type<-scRNA.sub$Celltype_Subset
+cell.type<-scRNA.sub$Celltype_subset
 plots<-list()
 for(i in 1:ncol(signature.matrix)){
   exp.matrix<-data.frame("expression"=signature.matrix[,i],"group"=group,"cell"=cell.type)
@@ -1016,7 +1018,6 @@ ggsave("output/FigS6F.lower_B_annot_markers_Dotplot.pdf", p, width = 12, height 
 ################################################################################
 #  Fig.S6G — Myeloid cell UMAP (upper left) + density by group (upper right) + dotplot of annotation markers (lower)
 ################################################################################
-## here ##
   
 scRNA_M <- readRDS("M_DC_seurat.rds")#this version comes from 20250423
 scRNA <- scRNA_M
@@ -1211,6 +1212,9 @@ dev.off()
 # Fig.3K — Macrophage M1/M2 signature violin plots
 ################################################################################
 
+# DEFINE GROUP LABELS AS NOT DEFINED IN THIS SCRIPT
+group_labels <- setNames(names(group_colors), names(group_colors))
+
 # Score M1 / M2 signatures (assumed already in meta.data as M14, M25)
 scRNA_M_sub <- subset(scRNA,
                       Celltype_subset %in% c("M_c2_Macro_APOE",
@@ -1249,7 +1253,6 @@ pK1 <- make_violin_K("M14", "M1-like signature")
 pK2 <- make_violin_K("M25", "M2-like signature")
 pK  <- pK1 + pK2 + plot_layout(ncol = 2)
 ggsave("output/Fig3K_Macrophage_M1M2_violin.pdf", pK, width = 3.2, height = 3)
-
 
 ################################################################################
 # Fig.3L — Macrophage Fc-receptor dot plot
@@ -1506,46 +1509,76 @@ ggsave("output/FigS6J.lower_EC_annot_markers_Dotplot.pdf", p, width = 12, height
 
 
 ################################################################################
-# CODE TO REPLACE 3C Violin Plots with Sample Wise Box Plots
+# Fig. 3C Boxplot Replacement CD8+ T cells)
 ################################################################################
 
-library(ggrepel)
-library(stringr)
+# Ensure group labels are defined in the active environment
+group_labels <- c(
+  "pre-pCR"  = "pre-pCR", 
+  "pre-RD"   = "pre-RD",
+  "post-pCR" = "post-pCR",
+  "post-RD"  = "post-RD"
+)
 
-# Sample-wise boxplot comparing per-sample mean scores across groups
-scRNA.sub <- subset(scRNA, new_group %in% c("pre-pCR", "pre-RD"))
+scRNA_CD8_eval <- readRDS("data/CD8T_seurat.rds")
 
-signature.matrix <- scRNA.sub@meta.data[, c("Naive1", "Cytokine.Cytokine.receptor6", "Chemokine.Chemokine.receptor7")]  # CD8T
-group <- scRNA.sub$new_group
+# Explicitly load and clean the CD8T signature list so it doesn't use Myeloid signatures
+TNBC_signature_CD8_box <- read.csv("CD8T_function_signature.csv", header = TRUE)
+geneSets.list_CD8_box <- as.list(TNBC_signature_CD8_box[,])
+for (i in 1:length(geneSets.list_CD8_box)){
+  geneSets.list_CD8_box[[i]] <- geneSets.list_CD8_box[[i]][geneSets.list_CD8_box[[i]] != ""]
+}
+
+# Score it using the CD8T signatures
+scRNA_CD8_eval <- AddModuleScore(
+  object = scRNA_CD8_eval,
+  features = geneSets.list_CD8_box,
+  ctrl = 100,
+  name = names(geneSets.list_CD8_box)
+)
+
+# Re-create the pre-treatment subset using the scored CD8 object
+scRNA.sub <- subset(scRNA_CD8_eval, new_group %in% c("pre-pCR", "pre-RD"))
+
+# Extract target signature scores and metadata
+signature.matrix <- scRNA.sub@meta.data[, c("Naive1", "Cytokine.Cytokine.receptor6", "Chemokine.Chemokine.receptor7")]
+group  <- scRNA.sub$new_group
 sample <- scRNA.sub$new_id_4
 
+# Helper function to clean up and wrap long titles
 clean_title <- function(x) {
-  gsub("\\.", " ", x) %>%  # replace dots with spaces
-    stringr::str_wrap(width = 20)  # wrap at 20 characters
+  gsub("\\.", " ", x) %>%  
+    stringr::str_wrap(width = 20)  
 }
+
 plots <- list()
+
 for (i in 1:ncol(signature.matrix)) {
   
+  # Set up data frame for the current signature
   exp.matrix <- data.frame(
     expression = signature.matrix[, i],
     group = group,
     sample = sample
   )
   
+  # Calculate per-sample means
   sample.means <- exp.matrix %>%
     group_by(sample, group) %>%
     summarise(expression = mean(expression, na.rm = TRUE), .groups = "drop")
   
+  # Set up sample size labels for the x-axis
   n_labels <- sample.means %>%
     group_by(group) %>%
     summarise(n = n(), .groups = "drop") %>%
     mutate(label = paste0(group, "\n(n=", n, ")"))
   label_map <- setNames(n_labels$label, n_labels$group)
   
-  # Separate left (pre-pCR) and right (pre-RD) for directional nudging
+  # Set up directional nudges for clean labeling (pCR left, RD right)
   sample.means <- sample.means %>%
     mutate(nudge = ifelse(group == "pre-pCR", -0.6, 0.6))
   
+  # Build the plot
   plots[[i]] <- ggboxplot(
     sample.means,
     x = "group",
@@ -1573,26 +1606,23 @@ for (i in 1:ncol(signature.matrix)) {
     scale_x_discrete(labels = label_map) +
     ylab("Score") +
     xlab(NULL) +
-    ggtitle(colnames(signature.matrix)[i]) +
-    theme_classic(base_size = 11) 
+    ggtitle(clean_title(colnames(signature.matrix)[i])) +
+    theme_classic(base_size = 11) +  
     theme(
       plot.title = element_text(hjust = 0.5, face = "bold", size = 11),
       axis.text.x = element_text(size = 9, face = "bold"),
       legend.position = "none",
-      plot.margin = margin(5, 40, 5, 40)  # extra left/right margin for labels
+      plot.margin = margin(5, 40, 5, 40)  
     ) +
     stat_compare_means(
       label = "p.format",
       method = "wilcox.test",
-      label.x.npc = 0.65,   # push p-value to right
-      label.y.npc = 0.97,   # top of plot
+      label.x.npc = 0.65,   
+      label.y.npc = 0.97,   
       size = 3.5
     )
 }
 
+# Wrap, build, and save the final multipanel figure
 signature.score.plot <- wrap_plots(plots = plots, ncol = 3)
 ggsave("output/Fig3C_CD8T_boxplots.pdf", signature.score.plot, width = 10, height = 6)
-
-
-
-

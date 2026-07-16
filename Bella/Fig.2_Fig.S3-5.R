@@ -577,14 +577,14 @@ robust_nmf_programs <- function(nmf_programs, intra_min = 35, intra_max = 10, in
   return(final_filter)                                                      
 }
 # get NMF matrix
-sct.scale.all = GetAssayData(scRNA.pre, slot="scale.data",assay="SCT")
+sct.scale.all = GetAssayData(scRNA.pre, layer="scale.data",assay="SCT")
 cell_counts <- table(scRNA.pre$new_id_4)
 sample <- names(cell_counts[cell_counts > 0])
 score.list<-list()
 for (i in 1:length(sample)){
   score.df<-data.frame("gene"=rownames(sct.scale.all))
   scRNA.sub<-subset(scRNA,new_id_4 %in% sample[i])
-  sct.scale.matrix = GetAssayData(scRNA.sub, slot="scale.data",assay="SCT")
+  sct.scale.matrix = GetAssayData(scRNA.sub, layer ="scale.data",assay="SCT")
   sct.scale.matrix[sct.scale.matrix<0]<-0#non-negative
   sct.scale.matrix.filter<-sct.scale.matrix [rowSums(sct.scale.matrix)>0,]#exclude non-expressing genes
   for (j in 4:9){
@@ -1032,6 +1032,8 @@ select <- dplyr::select
 filter <- dplyr::filter
 
 dir.create("output", showWarnings = FALSE)
+
+setwd("/Users/isabellapabon/Documents/Ting Data")
 
 # Shared palette used across every figure: pCR / M1 = red, RD / M2 = blue
 group_colors <- c("pre-pCR" = "#CC0C00FF", "pre-RD" = "#5C88DAFF")
@@ -1538,12 +1540,24 @@ mac <- scRNA_M        # full myeloid/DC object -- see note above
 
 # M1-like / M2-like module scores. AddModuleScore appends a "1" to the name argument,
 # so these land in the metadata as M1_score1 / M2_score1 (not M1_score).
-m1_genes <- c("TNF", "IL6", "IL1B", "CXCL10", "CXCL9", "CD86", "NOS2", "STAT1")
-m2_genes <- c("MRC1", "CD163", "ARG1", "IL10", "TGFB1", "CCL18", "VEGFA", "PDCD1LG2")
-m1_genes <- m1_genes[m1_genes %in% rownames(mac)]   # AddModuleScore errors on absent genes
-m2_genes <- m2_genes[m2_genes %in% rownames(mac)]
-mac <- AddModuleScore(mac, features = list(m1_genes), name = "M1_score")
-mac <- AddModuleScore(mac, features = list(m2_genes), name = "M2_score")
+m1_genes <- c("IL1B", "NLRP3", "CCL4", "FCGR2A")
+m2_genes <- c("CD163", "C1QC", "APOE", "SELENOP", "PLTP", "SPP1", "FCGR3A")
+
+mac <- AddModuleScore(
+  object = mac,
+  features = list(M1_score = m1_genes),
+  ctrl = 100,
+  name = "M1_score"
+)
+
+mac <- AddModuleScore(
+  object = mac,
+  features = list(M2_score = m2_genes),
+  ctrl = 100,
+  name = "M2_score"
+)
+
+scRNA_M_sub$new_group
 
 # c4-vs-c11 module scores (feeds the boxplot).
 # droplevels() is essential: subsetting a factor keeps all 15 levels, and wilcox.test
@@ -1705,12 +1719,6 @@ print(combined); dev.off()
 
 
 ########################################
-#
-# REVIEWER REQUEST: "Can you do the overall M1 vs M2 by sample among macrophage populations
-# only (not other myeloid populations), comparing pCR to RD samples, similar to what you did
-# for CD8 cell signatures?"
-#
-# Two figures answer this:
 #   1. Macrophage_M1_M2_by_sample.pdf         - THE deliverable. Same layout as the Fig 3C CD8
 #                                               signature boxplots: per-sample means, labeled
 #                                               points, Wilcoxon. This is what "overall ... by
@@ -1860,22 +1868,8 @@ write.csv(mac_stats, "output/Macrophage_M1_M2_by_sample_stats.csv", row.names = 
 
 
 ### SUPPLEMENTARY: Macrophage M1/M2 dot-heatmap by sample -> output/Macrophage_M1_M2_dotheatmap_by_sample.pdf ###
-# Per-gene companion to the boxplot above. Same figure grammar as CD8T_dotheatmap_by_response:
-# fill = z-scored mean expression, dot size = % of cells expressing, category strip on top,
-# N-count barplot on the left.
-#
-# Differences from the CD8 version:
-#   - rows are SAMPLES, not clusters
-#   - columns are the M1 / M2 signature genes, column-split by signature
-#   - pCR vs RD is a ROW split, not two side-by-side heatmaps (a sample is in one group only,
-#     so unlike the CD8 clusters the two blocks cannot share rows)
-#   - z-scores are computed ACROSS ALL SAMPLES, not within each response block. The CD8 figure
-#     z-scored within panel because the panels weren't the comparison; here they ARE, and
-#     within-block scaling would center both blocks on zero and mathematically erase the
-#     group difference the reviewer asked to see.
 
-# Drop genes essentially undetected in this compartment -- an all-empty column (ARG1) is
-# a distraction, not a null result worth plotting.
+# Drop genes essentially undetected in this compartment
 genes_all <- c(m1_genes, m2_genes)
 pct_all   <- FetchData(mac, vars = genes_all)[macro_meta$cell, , drop = FALSE] %>%
   summarise(across(everything(), ~ mean(.x > 0))) %>%
@@ -1889,9 +1883,7 @@ if (length(dropped))
 genes_use     <- genes_all[!genes_all %in% dropped]
 gene_category <- setNames(ifelse(genes_use %in% m1_genes, "M1-like", "M2-like"), genes_use)
 
-# Sanity check: rows are sorted by polarization, so confirm that sort isn't just sorting on
-# sequencing depth. Per-sample means over few cells have high variance and land in the tails,
-# so a strong negative rho would mean the top of each block is noise, not biology.
+# Sanity check: rows (now columns) sorted by polarization
 ct <- suppressWarnings(cor.test(sample_scores$n_mac, sample_scores$polarization,
                                 method = "spearman"))
 message("n_mac vs polarization: rho = ", signif(ct$estimate, 2),
@@ -1900,26 +1892,24 @@ message("n_mac vs polarization: rho = ", signif(ct$estimate, 2),
 # Per-sample, per-gene summary
 dot_by_sample <- FetchData(mac, vars = genes_use) %>%
   rownames_to_column("cell") %>%
-  # join on cell barcode rather than assuming FetchData and macro_meta share row order
   dplyr::inner_join(dplyr::select(macro_meta, cell, sample, response), by = "cell") %>%
   pivot_longer(dplyr::all_of(genes_use), names_to = "gene", values_to = "expression") %>%
   dplyr::group_by(gene, sample, response) %>%
   dplyr::summarise(mean_expr   = mean(expression, na.rm = TRUE),
                    pct_express = mean(expression > 0, na.rm = TRUE),
                    .groups = "drop") %>%
-  # z-scored across ALL samples per gene, so the pCR and RD blocks sit on one scale
   dplyr::group_by(gene) %>%
   dplyr::mutate(z_score = scale(mean_expr)[, 1]) %>%
   dplyr::ungroup()
 
-# Rows: grouped by response, sorted within group by M1-M2 polarization (most M1-skewed on top)
+# Align sample levels and split vectors
 sample_levels <- sample_scores %>%
   dplyr::arrange(response, dplyr::desc(polarization)) %>%
   dplyr::pull(sample)
-row_split_s <- factor(sample_scores$response[match(sample_levels, sample_scores$sample)],
-                      levels = c("pre-pCR", "pre-RD"))   # _s suffix: `row_split` is taken by the CD8 heatmap
+col_split_s <- factor(sample_scores$response[match(sample_levels, sample_scores$sample)],
+                      levels = c("pre-pCR", "pre-RD"))   
 
-# Aligned matrices, both indexed [sample_levels, genes_use] so cell_fun's i/j lookups line up
+# Original matrices [samples, genes]
 to_mat <- function(val) dot_by_sample %>%
   dplyr::select(sample, gene, dplyr::all_of(val)) %>%
   pivot_wider(names_from = gene, values_from = dplyr::all_of(val)) %>%
@@ -1927,68 +1917,80 @@ to_mat <- function(val) dot_by_sample %>%
 zmat <- to_mat("z_score")[sample_levels, genes_use, drop = FALSE]
 pmat <- to_mat("pct_express")[sample_levels, genes_use, drop = FALSE]
 
-# Colors + dot geometry (same constants as the CD8 heatmap, so the two figures match visually)
+# --- Transpose matrices so genes are rows, samples are columns ---
+zmat_t <- t(zmat)
+pmat_t <- t(pmat)
+
+# Colors + dot geometry 
 col_fun_s <- colorRamp2(c(-2, 0, 2), c("#5C88DAFF", "white", "#CC0C00FF"))
-cell_mm <- 7; max_r <- 2.45          # max_r ~= 0.35*cell_mm so dots never touch at 100%
+cell_mm <- 7; max_r <- 2.45   
 
-signature_cols <- c("M1-like" = "#CC0C00FF", "M2-like" = "#5C88DAFF")
+# PI FIX: Change M1/M2 to neutral tones (Charcoal & Light Grey) 
+# so Red/Blue can be strictly reserved for patient response groups.
+signature_cols <- c("M1-like" = "#4D4D4D", "M2-like" = "#C0C0C0")
 
-# One dot per cell: outline rectangle + circle sized by % expressed
+# Updated cell function indexing the transposed pmat_t [gene_row, sample_col]
 cell_fun_s <- function(j, i, x, y, width, height, fill) {
   grid.rect(x, y, width, height, gp = gpar(col = "grey92", fill = NA, lwd = 0.4))
-  pe <- pmat[i, j]
+  pe <- pmat_t[i, j]
   if (!is.na(pe) && pe > 0)
     grid.circle(x, y, r = unit(pe * max_r, "mm"),
                 gp = gpar(fill = fill, col = "grey35", lwd = 0.3))
 }
 
-# Top: mean % of cells expressing each gene (across samples) + M1/M2 signature strip
+# --- AXIS SWAP: Top Annotation (now tracks SAMPLES along the columns) ---
+# PI FIX: Added "Response" bar colored with your shared red/blue group colors
+n_mac_vec <- sample_scores$n_mac[match(sample_levels, sample_scores$sample)]
 top_anno_s <- HeatmapAnnotation(
-  `Mean % expressing` = anno_barplot(colMeans(pmat, na.rm = TRUE),
-                                     gp = gpar(fill = "grey55", col = NA),
-                                     height = unit(1, "cm"),
-                                     axis_param = list(gp = gpar(fontsize = 6))),
-  Signature = gene_category[genes_use],
-  col = list(Signature = signature_cols),
-  simple_anno_size     = unit(3.5, "mm"),
-  show_annotation_name = c(TRUE, FALSE),   # name the barplot, not the color strip (legend covers it)
+  Response = col_split_s,
+  `N macrophages` = anno_barplot(n_mac_vec, 
+                                 gp = gpar(fill = "grey45", col = NA),
+                                 height = unit(1.6, "cm"),
+                                 axis_param = list(gp = gpar(fontsize = 6))),
+  col = list(Response = group_colors), # Automatically maps red to pre-pCR and blue to pre-RD
+  annotation_name_gp   = gpar(fontsize = 7),
   annotation_name_side = "left",
+  gap = unit(1.5, "mm")
+)
+
+# --- AXIS SWAP: Left Annotation (now tracks GENES along the rows) ---
+left_anno_s <- rowAnnotation(
+  `Mean % expressing` = anno_barplot(rowMeans(pmat_t, na.rm = TRUE),
+                                     gp = gpar(fill = "grey55", col = NA),
+                                     width = unit(1, "cm"),
+                                     axis_param = list(gp = gpar(fontsize = 6))),
+  Signature = gene_category[rownames(zmat_t)],
+  col = list(Signature = signature_cols), # Uses the new neutral colors
+  simple_anno_size     = unit(3.5, "mm"),
+  show_annotation_name = c(TRUE, FALSE),   
+  annotation_name_side = "bottom",
   annotation_name_gp   = gpar(fontsize = 7),
   gap = unit(1, "mm")
 )
 
-# Left: how many macrophages each sample contributed -- the reader's caveat on small samples
-n_mac_vec <- sample_scores$n_mac[match(sample_levels, sample_scores$sample)]
-left_anno_s <- rowAnnotation(
-  `N macrophages` = anno_barplot(n_mac_vec, gp = gpar(fill = "grey45", col = NA),
-                                 width = unit(1.6, "cm"),
-                                 axis_param = list(gp = gpar(fontsize = 6))),
-  annotation_name_gp  = gpar(fontsize = 7),
-  annotation_name_rot = 90,
-  gap = unit(1, "mm")
-)
-
+# Render Heatmap with swapped configurations
 ht_s <- Heatmap(
-  zmat, col = col_fun_s,
-  rect_gp  = gpar(type = "none"),          # cell_fun_s draws the cells
+  zmat_t, col = col_fun_s,
+  rect_gp  = gpar(type = "none"),          
   cell_fun = cell_fun_s,
-  cluster_rows = FALSE, cluster_columns = FALSE,   # both orders are curated
-  row_split = row_split_s, row_gap = unit(2, "mm"),
-  row_title_gp = gpar(fontsize = 9, fontface = "bold"), row_title_rot = 0,
-  column_split = factor(gene_category[genes_use], levels = c("M1-like", "M2-like")),
+  cluster_rows = FALSE, cluster_columns = FALSE,   
+  column_split = col_split_s, 
   column_gap = unit(2, "mm"),
-  column_title_gp = gpar(fontface = "bold", fontsize = 10),
+  column_title_gp = gpar(fontsize = 9, fontface = "bold"), 
+  row_split = factor(gene_category[rownames(zmat_t)], levels = c("M1-like", "M2-like")),
+  row_gap = unit(2, "mm"),
+  row_title_gp = gpar(fontface = "bold", fontsize = 10), row_title_rot = 0,
   top_annotation  = top_anno_s,
   left_annotation = left_anno_s,
-  width  = unit(ncol(zmat) * cell_mm, "mm"),
-  height = unit(nrow(zmat) * cell_mm, "mm"),
-  column_names_gp = gpar(fontsize = 9, fontface = "italic"),
-  row_names_side  = "left", row_names_gp = gpar(fontsize = 8),
+  width  = unit(ncol(zmat_t) * cell_mm, "mm"),
+  height = unit(nrow(zmat_t) * cell_mm, "mm"),
+  column_names_gp = gpar(fontsize = 8),
+  row_names_side  = "left", row_names_gp = gpar(fontsize = 9, fontface = "italic"),
   name = "Z-score\n(mean expr)",
   border = TRUE
 )
 
-# Manual size legend, geometry matched to cell_fun_s (diameter = 2 * radius)
+# Legend
 pct_breaks <- c(0.25, 0.5, 0.75, 1.0)
 lgd_size_s <- Legend(
   title = "% Expressed", labels = paste0(pct_breaks * 100, "%"),
@@ -1997,21 +1999,84 @@ lgd_size_s <- Legend(
   title_gp = gpar(fontsize = 9, fontface = "bold"), labels_gp = gpar(fontsize = 8)
 )
 
-# Height scales with sample count so the cells stay square as samples are added/dropped.
-# padding widens the left margin so the rotated "N macrophages" title isn't clipped.
+# Swapped layout dimensions (wider rather than taller, scaling with sample columns)
 pdf("output/Macrophage_M1_M2_dotheatmap_by_sample.pdf",
-    width = 10.5, height = 3 + 0.30 * nrow(zmat))
+    width = 4 + 0.30 * ncol(zmat_t), height = 6.5)
+
 draw(ht_s,
      column_title = "Macrophage M1/M2 marker expression by sample and response",
      column_title_gp = gpar(fontface = "bold", fontsize = 13),
      annotation_legend_list = list(lgd_size_s),
      merge_legend = TRUE,
      heatmap_legend_side = "right", annotation_legend_side = "right",
-     padding = unit(c(8, 12, 2, 2), "mm"))   # bottom, left, top, right
+     padding = unit(c(12, 12, 2, 2), "mm"))   # bottom, left, top, right
+
 grid.text(
-  paste("Rows = samples (macrophage clusters only), sorted by M1-M2 polarization within response.",
+  paste("Columns = samples (macrophage clusters only), sorted by M1-M2 polarization within response.",
         "\nZ-scores computed across all samples per gene, so pCR and RD blocks are directly comparable."),
   x = unit(0.5, "npc"), y = unit(0.025, "npc"),
   gp = gpar(fontsize = 8, fontface = "italic")
 )
+dev.off()
+
+### SUPPLEMENTARY: Macrophage M1 vs M2 Scatterplot -> output/Macrophage_M1_M2_scatterplot.pdf ###
+library(ggplot2)
+library(ggpubr) # Optional, for adding correlation coefficients easily
+
+# 1. Calculate the sample-level average expression for M1 and M2 signatures
+# (Using the same pre-filtered 'genes_use' from your heatmap script)
+m1_use <- genes_use[genes_use %in% m1_genes]
+m2_use <- genes_use[genes_use %in% m2_genes]
+
+scatter_data <- FetchData(mac, vars = genes_use) %>%
+  rownames_to_column("cell") %>%
+  dplyr::inner_join(dplyr::select(macro_meta, cell, sample, response), by = "cell") %>%
+  pivot_longer(dplyr::all_of(genes_use), names_to = "gene", values_to = "expression") %>%
+  # Determine which signature each gene belongs to
+  dplyr::mutate(signature = ifelse(gene %in% m1_use, "M1_score", "M2_score")) %>%
+  # Average expression per sample, per signature
+  dplyr::group_by(sample, response, signature) %>%
+  dplyr::summarise(mean_val = mean(expression, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = signature, values_from = mean_val) %>%
+  # Ensure response is ordered correctly
+  dplyr::mutate(response = factor(response, levels = c("pre-pCR", "pre-RD")))
+
+# 2. Build the ggplot
+# We use custom colors matching your previous theme: red for pCR, blue for RD (or vice versa)
+response_cols <- c("pre-pCR" = "#CC0C00FF", "pre-RD" = "#5C88DAFF")
+
+p_scatter <- ggplot(scatter_data, aes(x = M1_score, y = M2_score)) +
+  # Add a light background grid for readability
+  theme_bw(base_size = 11) +
+  # Add overall trend line (linear regression)
+  geom_smooth(method = "lm", formula = y ~ x, color = "grey40", fill = "grey90", alpha = 0.5, linetype = "dashed") +
+  # Plot sample points colored/shaped by clinical response
+  geom_point(aes(fill = response, shape = response), size = 4.5, color = "grey30", stroke = 0.5) +
+  # Style shapes: 21 (circle) and 24 (triangle) allow both border and fill coloring
+  scale_shape_manual(values = c("pre-pCR" = 21, "pre-RD" = 24)) +
+  scale_fill_manual(values = response_cols) +
+  # Labels
+  labs(
+    title = "Macrophage M1 vs. M2 Marker Expression",
+    subtitle = "Pre-treatment samples by clinical response",
+    x = "Mean M1-like Expression",
+    y = "Mean M2-like Expression",
+    fill = "Response",
+    shape = "Response"
+  ) +
+  # Clean up theme elements to match publication-quality layout
+  theme(
+    plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+    plot.subtitle = element_text(face = "italic", size = 10, hjust = 0.5, color = "grey30"),
+    panel.grid.minor = element_blank(),
+    legend.position = "right",
+    legend.background = element_blank(),
+    legend.box.background = element_rect(colour = "grey80", size = 0.5)
+  ) +
+  # Add statistical annotation (Pearson or Spearman correlation)
+  stat_cor(method = "pearson", label.x.npc = "left", label.y.npc = "top", size = 3.5, fontface = "italic")
+
+# 3. Save the plot
+pdf("output/Macrophage_M1_M2_scatterplot.pdf", width = 5.5, height = 4.5)
+print(p_scatter)
 dev.off()
