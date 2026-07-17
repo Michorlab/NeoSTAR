@@ -74,9 +74,6 @@ BiocManager::install("genefu")
 
 R.version.string
 
-# set and confirm path
-setwd("/Users/isabellapabon/Documents/Ting Data")
-
 # Library all packages needed for scRNAseq analysis
 ## Core
 library(Seurat)

@@ -1509,7 +1509,7 @@ ggsave("output/FigS6J.lower_EC_annot_markers_Dotplot.pdf", p, width = 12, height
 
 
 ################################################################################
-# Fig. 3C Boxplot Replacement CD8+ T cells)
+# Fig. 3C Boxplot Replacement (CD8+ T cells) - Isabella Pabon's addition
 ################################################################################
 
 # Ensure group labels are defined in the active environment
